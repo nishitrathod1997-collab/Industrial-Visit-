@@ -1,0 +1,78 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    background-color: #F8FAFC;
+    color: #0F172A;
+    font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+}
+
+/* Institutional Academic Color Utilities */
+:root {
+  --primary-navy: #0B2545;
+  --secondary-navy: #133E87;
+  --accent-gold: #D97706;
+  --accent-gold-hover: #B45309;
+}
+
+.bg-institutional-navy {
+  background-color: #0B2545;
+}
+
+.text-institutional-navy {
+  color: #0B2545;
+}
+
+.bg-institutional-blue {
+  background-color: #133E87;
+}
+
+.text-institutional-blue {
+  color: #133E87;
+}
+
+.bg-institutional-gold {
+  background-color: #D97706;
+}
+
+.text-institutional-gold {
+  color: #B45309;
+}
+
+/* Custom subtle scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #F1F5F9;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #CBD5E1;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94A3B8;
+}
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .printable-ticket, .printable-ticket * {
+    visibility: visible;
+  }
+  .printable-ticket {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+  }
+  .no-print {
+    display: none !important;
+  }
+}

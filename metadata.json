@@ -1,0 +1,6 @@
+{
+  "name": "VIT Industrial Exposure",
+  "description": "Comprehensive industrial exposure and technical tour management platform for Vidyalankar Institute of Technology connecting students, faculty, and administrators with registration workflows, waitlist automation, boarding passes, digital attendance, official certificate issuance, and AI assistance.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
