@@ -1,0 +1,103 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Enums are not supported in SQLite, so we'll use Strings for role and status
+
+model User {
+  id                     String    @id @default(uuid())
+  name                   String
+  email                  String    @unique
+  role                   String    @default("STUDENT") // STUDENT, FACULTY, ADMIN
+  status                 String    @default("ACTIVE") // ACTIVE, INACTIVE
+  passwordHash           String?
+  salt                   String?
+  avatar                 String?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+  consentStatus          String?   // PENDING_VERIFICATION, VERIFIED, REJECTED
+  consentDocumentUrl     String?
+  consentRejectionReason String?
+  consentUploadedAt      DateTime?
+
+  // Relations
+  studentProfile StudentProfile?
+  facultyProfile FacultyProfile?
+  registrations  Registration[]
+}
+
+model StudentProfile {
+  id                   String  @id @default(uuid())
+  userId               String  @unique
+  user                 User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  studentId            String  @unique // e.g., "21BCE10482"
+  branch               String
+  year                 Int
+  semester             Int
+  division             String
+  department           String
+  cgpa                 Float
+  phone                String
+  prn                  String
+  activeBacklogs       Int     @default(0)
+  attendancePercentage Float   @default(100)
+}
+
+model FacultyProfile {
+  id           String  @id @default(uuid())
+  userId       String  @unique
+  user         User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  facultyId    String  @unique
+  department   String
+  designation  String
+  employeeCode String
+  phone        String
+}
+
+model Experience {
+  id                      String    @id @default(uuid())
+  title                   String
+  organization            String
+  organizationDescription String
+  organizationIndustry    String
+  organizationWebsite     String
+  experienceType          String
+  shortDescription        String
+  detailedDescription     String
+  date                    DateTime
+  location                String
+  address                 String
+  contribution            Float     @default(0)
+  capacity                Int
+  waitlistEnabled         Boolean   @default(false)
+  waitlistCapacity        Int       @default(0)
+  registrationOpen        DateTime
+  registrationDeadline    DateTime
+  status                  String    @default("DRAFT")
+  createdBy               String
+  primaryFacultyId        String
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  registrations           Registration[]
+}
+
+model Registration {
+  id                 String    @id @default(uuid())
+  studentId          String
+  experienceId       String
+  status             String    @default("PENDING")
+  registeredAt       DateTime  @default(now())
+  cancelledAt        DateTime?
+  updatedAt          DateTime  @updatedAt
+
+  user               User      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  experience         Experience @relation(fields: [experienceId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, experienceId])
+}
