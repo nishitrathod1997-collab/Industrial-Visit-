@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { db } from './db';
+import { db, prisma } from './db';
 import {
   handleAssistantChat,
   handleStudentRecommendations,
@@ -19,6 +19,7 @@ import {
   createResetToken,
   verifyResetToken,
   consumeResetToken,
+  verifyPassword,
 } from './auth';
 import {
   getAnalyticsUserScope,
@@ -100,10 +101,6 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Please use your official @vit.edu.in college email address.' });
     }
   }
-
-  const { prisma } = require('./db');
-  const { verifyPassword } = require('./auth');
-
   try {
     let user = null;
     if (inputStr.includes('@')) {
