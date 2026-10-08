@@ -15,37 +15,34 @@ export function verifyPassword(password: string, hash: string, salt: string): bo
   return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(calculatedHash, 'hex'));
 }
 
-// In-memory token store: token -> userId
-const tokenStore = new Map<string, { userId: string; createdAt: number }>();
+import jwt from 'jsonwebtoken';
+
+const JWT_SECRET = process.env.JWT_SECRET || 'vit_secret_super_key_development_only';
 
 // Password reset token store: token -> { email: string; expiresAt: number }
 const resetTokenStore = new Map<string, { userId: string; email: string; expiresAt: number }>();
 
 export function createAuthToken(userId: string): string {
-  const token = `vit_sess_${userId}_${crypto.randomBytes(16).toString('hex')}`;
-  tokenStore.set(token, { userId, createdAt: Date.now() });
-  return token;
+  // Create a JWT token that expires in 7 days
+  return jwt.sign({ userId }, JWT_SECRET, { expiresIn: '7d' });
 }
 
 export function getUserIdFromToken(token: string): string | null {
   if (!token) return null;
 
-  // Support direct userId format for legacy token persistence if valid
-  if (tokenStore.has(token)) {
-    return tokenStore.get(token)!.userId;
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET) as { userId: string };
+    return decoded.userId;
+  } catch (error) {
+    // Token is invalid or expired
+    return null;
   }
-
-  // Fallback for initial seed tokens (e.g. "usr_student_1")
-  if (token.startsWith('usr_')) {
-    return token;
-  }
-
-  return null;
 }
 
 export function invalidateToken(token: string): boolean {
-  if (!token) return false;
-  return tokenStore.delete(token);
+  // With JWTs, true invalidation requires a blacklist or short expiry + refresh tokens.
+  // For now, we rely on token expiration. 
+  return true;
 }
 
 export function createResetToken(userId: string, email: string): string {

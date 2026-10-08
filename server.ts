@@ -11,7 +11,7 @@ dotenv.config();
 
 async function startServer() {
   const app = express();
-  const PORT = process.env.PORT || 3000;
+  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
   // Initialize background email queue dispatcher and 3-Day reminder scheduler
   initEmailWorker(db);
@@ -53,7 +53,7 @@ async function startServer() {
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        hmr: isHmrDisabled ? false : { port: 3000 },
+        hmr: isHmrDisabled ? false : undefined,
       },
       appType: 'spa',
     });

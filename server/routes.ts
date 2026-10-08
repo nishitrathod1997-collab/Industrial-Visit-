@@ -43,7 +43,7 @@ function sanitizeUser(user: any) {
 }
 
 // Helper to extract authenticated user from authorization header or query/header
-function getAuthUser(req: Request) {
+async function getAuthUser(req: Request) {
   const authHeader = req.headers.authorization;
   let token = '';
 
@@ -70,7 +70,7 @@ function getAuthUser(req: Request) {
 }
 
 // --- AUTH ROUTES ---
-apiRouter.post('/auth/login', (req: Request, res: Response) => {
+apiRouter.post('/auth/login', async (req: Request, res: Response) => {
   const { identifier, email, password, role } = req.body;
   const loginInput = identifier || email;
   const requestedRole = (role || 'STUDENT').toUpperCase() as 'STUDENT' | 'FACULTY' | 'ADMIN';
@@ -101,23 +101,67 @@ apiRouter.post('/auth/login', (req: Request, res: Response) => {
     }
   }
 
-  const result = db.authenticateUser(inputStr, password, requestedRole);
+  const { prisma } = require('./db');
+  const { verifyPassword } = require('./auth');
 
-  if (!result.success || !result.user) {
-    return res.status(result.statusCode || 401).json({ error: result.error || 'Authentication failed.' });
+  try {
+    let user = null;
+    if (inputStr.includes('@')) {
+      user = await prisma.user.findUnique({
+        where: { email: inputStr.toLowerCase() },
+        include: { studentProfile: true, facultyProfile: true }
+      });
+    } else {
+      if (requestedRole === 'STUDENT') {
+        const profile = await prisma.studentProfile.findUnique({
+          where: { studentId: inputStr.toUpperCase() },
+          include: { user: { include: { studentProfile: true } } }
+        });
+        if (profile) user = profile.user;
+      } else if (requestedRole === 'FACULTY') {
+        const profile = await prisma.facultyProfile.findUnique({
+          where: { facultyId: inputStr.toUpperCase() },
+          include: { user: { include: { facultyProfile: true } } }
+        });
+        if (profile) user = profile.user;
+      }
+    }
+
+    if (!user) {
+      return res.status(401).json({ error: 'No account found with these credentials.' });
+    }
+
+    if (user.role !== requestedRole) {
+      return res.status(401).json({ error: `Account exists but not as a ${requestedRole.toLowerCase()}.` });
+    }
+
+    if (user.status !== 'ACTIVE') {
+      return res.status(403).json({ error: 'Account is deactivated.' });
+    }
+
+    if (!user.passwordHash || !user.salt) {
+      return res.status(401).json({ error: 'Password not set for this account.' });
+    }
+
+    if (!verifyPassword(password, user.passwordHash, user.salt)) {
+      return res.status(401).json({ error: 'Incorrect password.' });
+    }
+
+    const token = createAuthToken(user.id);
+
+    return res.json({
+      token,
+      user: sanitizeUser(user),
+      student: user.studentProfile || null,
+      faculty: user.facultyProfile || null,
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    return res.status(500).json({ error: 'Internal server error.' });
   }
-
-  const token = createAuthToken(result.user.id);
-
-  return res.json({
-    token,
-    user: sanitizeUser(result.user),
-    student: result.student || null,
-    faculty: result.faculty || null,
-  });
 });
 
-apiRouter.post('/auth/me/phone/otp', (req: Request, res: Response) => {
+apiRouter.post('/auth/me/phone/otp', async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   if (!userId) return res.status(401).json({ message: 'Unauthorized' });
   const { phone } = req.body;
@@ -127,7 +171,7 @@ apiRouter.post('/auth/me/phone/otp', (req: Request, res: Response) => {
   res.json({ message: 'OTP sent successfully' });
 });
 
-apiRouter.post('/auth/me/phone/verify', (req: Request, res: Response) => {
+apiRouter.post('/auth/me/phone/verify', async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   if (!userId) return res.status(401).json({ message: 'Unauthorized' });
   const { phone, otp } = req.body;
@@ -142,7 +186,7 @@ apiRouter.post('/auth/me/phone/verify', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.put('/auth/me/password', (req: Request, res: Response) => {
+apiRouter.put('/auth/me/password', async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   if (!userId) return res.status(401).json({ message: 'Unauthorized' });
   const { currentPassword, newPassword } = req.body;
@@ -159,7 +203,7 @@ apiRouter.put('/auth/me/password', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.put('/auth/me/profile', (req: Request, res: Response) => {
+apiRouter.put('/auth/me/profile', async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   if (!userId) return res.status(401).json({ message: 'Unauthorized' });
   try {
@@ -170,8 +214,8 @@ apiRouter.put('/auth/me/profile', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.get('/auth/me', (req: Request, res: Response) => {
-  const { user, student, faculty } = getAuthUser(req);
+apiRouter.get('/auth/me', async (req: Request, res: Response) => {
+  const { user, student, faculty } = await getAuthUser(req);
   if (!user) {
     return res.status(401).json({ error: 'Not authenticated' });
   }
@@ -186,7 +230,7 @@ apiRouter.get('/auth/me', (req: Request, res: Response) => {
   });
 });
 
-apiRouter.post('/auth/logout', (req: Request, res: Response) => {
+apiRouter.post('/auth/logout', async (req: Request, res: Response) => {
   const authHeader = req.headers.authorization;
   let token = '';
   if (authHeader && authHeader.startsWith('Bearer ')) {
@@ -202,7 +246,7 @@ apiRouter.post('/auth/logout', (req: Request, res: Response) => {
   res.json({ success: true, message: 'Logged out successfully.' });
 });
 
-apiRouter.post('/auth/forgot-password', (req: Request, res: Response) => {
+apiRouter.post('/auth/forgot-password', async (req: Request, res: Response) => {
   const { identifier, email, role } = req.body;
   const loginInput = identifier || email;
   const requestedRole = (role || 'STUDENT').toUpperCase() as 'STUDENT' | 'FACULTY' | 'ADMIN';
@@ -225,7 +269,7 @@ apiRouter.post('/auth/forgot-password', (req: Request, res: Response) => {
   });
 });
 
-apiRouter.post('/auth/reset-password', (req: Request, res: Response) => {
+apiRouter.post('/auth/reset-password', async (req: Request, res: Response) => {
   const { token, newPassword } = req.body;
 
   if (!token || !newPassword) {
@@ -251,9 +295,9 @@ apiRouter.post('/auth/reset-password', (req: Request, res: Response) => {
   return res.json({ message: 'Password successfully reset. You can now sign in with your new password.' });
 });
 
-apiRouter.post('/auth/switch-user', (req: Request, res: Response) => {
+apiRouter.post('/auth/switch-user', async (req: Request, res: Response) => {
   const { userId } = req.body;
-  const currentAuth = getAuthUser(req);
+  const currentAuth = await getAuthUser(req);
 
   // Authorize user switching: only Admin can switch freely, or user can switch if authorized
   if (currentAuth.user && currentAuth.user.role !== 'ADMIN' && currentAuth.user.id !== userId) {
@@ -272,8 +316,8 @@ apiRouter.post('/auth/switch-user', (req: Request, res: Response) => {
 });
 
 // --- EXPERIENCES ROUTES ---
-apiRouter.get('/experiences', (req: Request, res: Response) => {
-  const { user, student } = getAuthUser(req);
+apiRouter.get('/experiences', async (req: Request, res: Response) => {
+  const { user, student } = await getAuthUser(req);
   const { status, type, search } = req.query as { status?: string; type?: string; search?: string };
 
   const experiences = db.getExperiences({
@@ -288,8 +332,8 @@ apiRouter.get('/experiences', (req: Request, res: Response) => {
   res.json(experiences);
 });
 
-apiRouter.get('/experiences/:id', (req: Request, res: Response) => {
-  const { user, student } = getAuthUser(req);
+apiRouter.get('/experiences/:id', async (req: Request, res: Response) => {
+  const { user, student } = await getAuthUser(req);
   const exp = db.getExperienceById(req.params.id, student?.studentId);
   if (!exp) return res.status(404).json({ error: 'Experience not found' });
   
@@ -441,7 +485,7 @@ function sanitizeExperiencePayload(body: any, userId: string) {
 }
 
 // --- ORGANIZATION LOOKUP & DIRECTORY ROUTES ---
-apiRouter.get('/organizations/lookup', (req: Request, res: Response) => {
+apiRouter.get('/organizations/lookup', async (req: Request, res: Response) => {
   try {
     const query = (req.query.q || req.query.query || req.query.name || '') as string;
     const result = searchVerifiedOrganizations(query);
@@ -456,7 +500,7 @@ apiRouter.get('/organizations/lookup', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.get('/organizations/presets', (_req: Request, res: Response) => {
+apiRouter.get('/organizations/presets', async (_req: Request, res: Response) => {
   try {
     // Return curated list of popular verified organizations across top engineering domains
     const popularIds = [
@@ -483,7 +527,7 @@ apiRouter.get('/organizations/presets', (_req: Request, res: Response) => {
   }
 });
 
-apiRouter.get('/organizations/all', (_req: Request, res: Response) => {
+apiRouter.get('/organizations/all', async (_req: Request, res: Response) => {
   try {
     res.json(VERIFIED_ORGANIZATIONS);
   } catch (err: any) {
@@ -491,8 +535,8 @@ apiRouter.get('/organizations/all', (_req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/experiences/preview-eligibility', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/experiences/preview-eligibility', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'FACULTY' && user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Only Faculty and Admin can preview eligibility metrics' });
   }
@@ -507,7 +551,7 @@ apiRouter.post('/experiences/preview-eligibility', (req: Request, res: Response)
   }
 });
 
-apiRouter.get('/academic-options', (_req: Request, res: Response) => {
+apiRouter.get('/academic-options', async (_req: Request, res: Response) => {
   try {
     const options = db.getDistinctAcademicOptions();
     res.json(options);
@@ -516,8 +560,8 @@ apiRouter.get('/academic-options', (_req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/experiences', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/experiences', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'FACULTY' && user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Only Faculty and Admin can create experiences' });
   }
@@ -540,8 +584,8 @@ apiRouter.post('/experiences', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/faculty/experiences', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/faculty/experiences', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'FACULTY' && user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Only Faculty and Admin can create experiences' });
   }
@@ -564,8 +608,8 @@ apiRouter.post('/faculty/experiences', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.put('/experiences/:id', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.put('/experiences/:id', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'FACULTY' && user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Unauthorized to edit experience' });
   }
@@ -580,8 +624,8 @@ apiRouter.put('/experiences/:id', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.put('/faculty/experiences/:id', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.put('/faculty/experiences/:id', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'FACULTY' && user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Unauthorized to edit experience' });
   }
@@ -596,8 +640,8 @@ apiRouter.put('/faculty/experiences/:id', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.delete('/experiences/:id', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.delete('/experiences/:id', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'FACULTY' && user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Unauthorized to delete experience' });
   }
@@ -611,8 +655,8 @@ apiRouter.delete('/experiences/:id', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.delete('/faculty/experiences/:id', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.delete('/faculty/experiences/:id', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'FACULTY' && user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Unauthorized to delete experience' });
   }
@@ -626,8 +670,8 @@ apiRouter.delete('/faculty/experiences/:id', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/experiences/:id/verify-pass', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/experiences/:id/verify-pass', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   const userId = user?.id || (req.headers['x-user-id'] as string) || 'FACULTY_SCANNER';
   const experienceId = req.params.id;
   const { passNumber, studentId, registrationId, qrPayload } = req.body;
@@ -666,8 +710,8 @@ apiRouter.post('/experiences/:id/verify-pass', (req: Request, res: Response) => 
   }
 });
 
-apiRouter.post('/experiences/:id/cancel', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/experiences/:id/cancel', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'FACULTY' && user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Unauthorized to cancel experience' });
   }
@@ -682,7 +726,7 @@ apiRouter.post('/experiences/:id/cancel', (req: Request, res: Response) => {
 
 // --- REGISTRATION & WAITLIST ---
 apiRouter.post('/experiences/:id/validate-consent', async (req: Request, res: Response) => {
-  const { user, student } = getAuthUser(req);
+  const { user, student } = await getAuthUser(req);
   if (user?.role !== 'STUDENT' || !student) {
     return res.status(403).json({ error: 'Only enrolled students can validate consent documents.' });
   }
@@ -710,7 +754,7 @@ apiRouter.post('/experiences/:id/validate-consent', async (req: Request, res: Re
 });
 
 apiRouter.post('/experiences/:id/register', async (req: Request, res: Response) => {
-  const { user, student } = getAuthUser(req);
+  const { user, student } = await getAuthUser(req);
   if (user?.role !== 'STUDENT' || !student) {
     return res.status(403).json({ error: 'Only enrolled students can register for industrial visits.' });
   }
@@ -724,7 +768,7 @@ apiRouter.post('/experiences/:id/register', async (req: Request, res: Response) 
 });
 
 apiRouter.post('/experiences/:id/consent', async (req: Request, res: Response) => {
-  const { user, student } = getAuthUser(req);
+  const { user, student } = await getAuthUser(req);
   if (user?.role !== 'STUDENT' || !student) {
     return res.status(403).json({ error: 'Only enrolled students can upload consent documents.' });
   }
@@ -742,8 +786,8 @@ apiRouter.post('/experiences/:id/consent', async (req: Request, res: Response) =
   }
 });
 
-const handleStudentCancelRegistration = (req: Request, res: Response) => {
-  const { user, student } = getAuthUser(req);
+const handleStudentCancelRegistration = async (req: Request, res: Response) => {
+  const { user, student } = await getAuthUser(req);
   if (user?.role !== 'STUDENT' || !student) {
     return res.status(403).json({ error: 'Unauthorized: Student account required to cancel registration' });
   }
@@ -761,16 +805,16 @@ apiRouter.delete('/experiences/:id/cancel-registration', handleStudentCancelRegi
 apiRouter.post('/experiences/:id/registration/cancel', handleStudentCancelRegistration);
 
 // --- STUDENT SPECIFIC ROUTES ---
-apiRouter.get('/student/experiences', (req: Request, res: Response) => {
-  const { student } = getAuthUser(req);
+apiRouter.get('/student/experiences', async (req: Request, res: Response) => {
+  const { student } = await getAuthUser(req);
   if (!student) return res.status(400).json({ error: 'Student profile not found' });
 
   const categorized = db.getStudentExperiences(student.studentId);
   res.json(categorized);
 });
 
-apiRouter.get('/student/boarding-pass/:experienceId', (req: Request, res: Response) => {
-  const { student } = getAuthUser(req);
+apiRouter.get('/student/boarding-pass/:experienceId', async (req: Request, res: Response) => {
+  const { student } = await getAuthUser(req);
   if (!student) return res.status(400).json({ error: 'Student profile not found' });
 
   const exp = db.getExperienceById(req.params.experienceId, student.studentId);
@@ -790,8 +834,8 @@ apiRouter.get('/student/boarding-pass/:experienceId', (req: Request, res: Respon
   });
 });
 
-apiRouter.post('/student/leave-request', (req: Request, res: Response) => {
-  const { student } = getAuthUser(req);
+apiRouter.post('/student/leave-request', async (req: Request, res: Response) => {
+  const { student } = await getAuthUser(req);
   if (!student) return res.status(400).json({ error: 'Student profile not found' });
 
   const { experienceId, reason, category, supportingDocument } = req.body;
@@ -807,32 +851,32 @@ apiRouter.post('/student/leave-request', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.get('/student/leave-requests', (req: Request, res: Response) => {
-  const { student } = getAuthUser(req);
+apiRouter.get('/student/leave-requests', async (req: Request, res: Response) => {
+  const { student } = await getAuthUser(req);
   if (!student) return res.status(400).json({ error: 'Student profile not found' });
 
   const leaves = db.getLeaveRequests({ studentId: student.studentId });
   res.json(leaves);
 });
 
-apiRouter.get('/student/notifications', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/student/notifications', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
   const notifs = db.getNotificationsForUser(user.id);
   res.json(notifs);
 });
 
-apiRouter.post('/student/notifications/:id/read', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/student/notifications/:id/read', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
   const notif = db.markNotificationAsRead(req.params.id);
   res.json({ success: !!notif });
 });
 
-apiRouter.post('/student/notifications/read-all', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/student/notifications/read-all', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
   const count = db.markAllNotificationsAsRead(user.id);
@@ -840,8 +884,8 @@ apiRouter.post('/student/notifications/read-all', (req: Request, res: Response) 
 });
 
 // --- MULTI-CHANNEL NOTIFICATION & EMAIL LOG ROUTES ---
-apiRouter.get('/notifications/emails', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/notifications/emails', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN' && user?.role !== 'FACULTY') {
     return res.status(403).json({ error: 'Unauthorized: Admin or Faculty access required' });
   }
@@ -856,8 +900,8 @@ apiRouter.get('/notifications/emails', (req: Request, res: Response) => {
   res.json(logs);
 });
 
-apiRouter.get('/notifications/emails/stats', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/notifications/emails/stats', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN' && user?.role !== 'FACULTY') {
     return res.status(403).json({ error: 'Unauthorized: Admin or Faculty access required' });
   }
@@ -868,7 +912,7 @@ apiRouter.get('/notifications/emails/stats', (req: Request, res: Response) => {
 });
 
 apiRouter.post('/notifications/emails/:id/retry', async (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN' && user?.role !== 'FACULTY') {
     return res.status(403).json({ error: 'Unauthorized: Admin or Faculty access required' });
   }
@@ -882,7 +926,7 @@ apiRouter.post('/notifications/emails/:id/retry', async (req: Request, res: Resp
 });
 
 apiRouter.post('/notifications/emails/retry-all', async (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN' && user?.role !== 'FACULTY') {
     return res.status(403).json({ error: 'Unauthorized: Admin or Faculty access required' });
   }
@@ -896,8 +940,8 @@ apiRouter.post('/notifications/emails/retry-all', async (req: Request, res: Resp
   }
 });
 
-apiRouter.get('/notifications/emails/worker-status', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/notifications/emails/worker-status', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN' && user?.role !== 'FACULTY') {
     return res.status(403).json({ error: 'Unauthorized: Admin or Faculty access required' });
   }
@@ -905,7 +949,7 @@ apiRouter.get('/notifications/emails/worker-status', (req: Request, res: Respons
 });
 
 apiRouter.post('/notifications/emails/process-queue', async (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN' && user?.role !== 'FACULTY') {
     return res.status(403).json({ error: 'Unauthorized: Admin or Faculty access required' });
   }
@@ -918,7 +962,7 @@ apiRouter.post('/notifications/emails/process-queue', async (req: Request, res: 
 });
 
 apiRouter.get('/notifications/smtp-verify', async (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN' && user?.role !== 'FACULTY') {
     return res.status(403).json({ error: 'Unauthorized: Admin or Faculty access required' });
   }
@@ -932,7 +976,7 @@ apiRouter.get('/notifications/smtp-verify', async (req: Request, res: Response) 
 });
 
 apiRouter.post('/notifications/test-email', async (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN' && user?.role !== 'FACULTY') {
     return res.status(403).json({ error: 'Unauthorized: Admin or Faculty access required' });
   }
@@ -947,7 +991,7 @@ apiRouter.post('/notifications/test-email', async (req: Request, res: Response) 
 });
 
 apiRouter.post('/experiences/:id/send-reminders', async (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN' && user?.role !== 'FACULTY') {
     return res.status(403).json({ error: 'Unauthorized: Admin or Faculty access required' });
   }
@@ -992,8 +1036,8 @@ function isFacultyAuthorizedForExperience(user: any, experienceId: string): bool
   );
 }
 
-apiRouter.get('/faculty/dashboard', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/faculty/dashboard', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'FACULTY' && user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Faculty access required' });
   }
@@ -1002,8 +1046,8 @@ apiRouter.get('/faculty/dashboard', (req: Request, res: Response) => {
   res.json(stats);
 });
 
-apiRouter.get('/faculty/experiences', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/faculty/experiences', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'FACULTY' && user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Faculty access required' });
   }
@@ -1026,8 +1070,8 @@ apiRouter.get('/faculty/experiences', (req: Request, res: Response) => {
   res.json(exps);
 });
 
-apiRouter.get('/faculty/experiences/:id/roster', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/faculty/experiences/:id/roster', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'FACULTY' && user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Unauthorized' });
   }
@@ -1041,8 +1085,8 @@ apiRouter.get('/faculty/experiences/:id/roster', (req: Request, res: Response) =
   res.json(roster);
 });
 
-apiRouter.post('/faculty/experiences/:id/attendance', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/faculty/experiences/:id/attendance', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'FACULTY' && user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Unauthorized' });
   }
@@ -1073,8 +1117,8 @@ apiRouter.post('/faculty/experiences/:id/attendance', (req: Request, res: Respon
   }
 });
 
-apiRouter.post('/faculty/experiences/:id/attendance-faculty', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/faculty/experiences/:id/attendance-faculty', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'FACULTY' && user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Unauthorized' });
   }
@@ -1111,8 +1155,8 @@ apiRouter.post('/faculty/experiences/:id/attendance-faculty', (req: Request, res
 });
 
 
-apiRouter.get('/faculty/experiences/:id/announcements', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/faculty/experiences/:id/announcements', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'FACULTY' && user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Unauthorized' });
   }
@@ -1125,8 +1169,8 @@ apiRouter.get('/faculty/experiences/:id/announcements', (req: Request, res: Resp
   res.json(anns);
 });
 
-apiRouter.get('/faculty/leaves', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/faculty/leaves', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'FACULTY' && user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Unauthorized' });
   }
@@ -1135,8 +1179,8 @@ apiRouter.get('/faculty/leaves', (req: Request, res: Response) => {
   res.json(leaves);
 });
 
-apiRouter.post('/faculty/leaves/:id/review', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/faculty/leaves/:id/review', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'FACULTY' && user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Unauthorized' });
   }
@@ -1155,7 +1199,7 @@ apiRouter.post('/faculty/leaves/:id/review', (req: Request, res: Response) => {
 });
 
 apiRouter.post('/faculty/announcements', async (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'FACULTY' && user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Unauthorized' });
   }
@@ -1177,8 +1221,8 @@ apiRouter.post('/faculty/announcements', async (req: Request, res: Response) => 
   }
 });
 
-apiRouter.get('/faculty/student-directory', (req: Request, res: Response) => {
-  const { user, student, faculty } = getAuthUser(req);
+apiRouter.get('/faculty/student-directory', async (req: Request, res: Response) => {
+  const { user, student, faculty } = await getAuthUser(req);
   const scope = getAnalyticsUserScope(user, student, faculty);
 
   if (!scope.isAuthorized) {
@@ -1328,8 +1372,8 @@ apiRouter.get('/faculty/student-directory', (req: Request, res: Response) => {
 
 // --- ANALYTICS AUTHORIZATION ROUTES ---
 
-apiRouter.get('/analytics/scope', (req: Request, res: Response) => {
-  const { user, student, faculty } = getAuthUser(req);
+apiRouter.get('/analytics/scope', async (req: Request, res: Response) => {
+  const { user, student, faculty } = await getAuthUser(req);
   const scope = getAnalyticsUserScope(user, student, faculty);
 
   if (!scope.isAuthorized) {
@@ -1348,8 +1392,8 @@ apiRouter.get('/analytics/scope', (req: Request, res: Response) => {
   });
 });
 
-apiRouter.get('/analytics/departmental-reports', (req: Request, res: Response) => {
-  const { user, student, faculty } = getAuthUser(req);
+apiRouter.get('/analytics/departmental-reports', async (req: Request, res: Response) => {
+  const { user, student, faculty } = await getAuthUser(req);
   const scope = getAnalyticsUserScope(user, student, faculty);
 
   if (!scope.isAuthorized) {
@@ -1385,8 +1429,8 @@ apiRouter.get('/analytics/departmental-reports', (req: Request, res: Response) =
   res.json(analytics);
 });
 
-apiRouter.get('/analytics/institutional-overview', (req: Request, res: Response) => {
-  const { user, student, faculty } = getAuthUser(req);
+apiRouter.get('/analytics/institutional-overview', async (req: Request, res: Response) => {
+  const { user, student, faculty } = await getAuthUser(req);
   const scope = getAnalyticsUserScope(user, student, faculty);
 
   if (!scope.isAuthorized || scope.scopeType !== 'INSTITUTION') {
@@ -1417,7 +1461,7 @@ apiRouter.get('/analytics/institutional-overview', (req: Request, res: Response)
 
 // PDF Report Export Route
 apiRouter.all('/analytics/export-pdf', async (req: Request, res: Response) => {
-  const { user, student, faculty } = getAuthUser(req);
+  const { user, student, faculty } = await getAuthUser(req);
   const scope = getAnalyticsUserScope(user, student, faculty);
 
   if (!scope.isAuthorized) {
@@ -1475,8 +1519,8 @@ apiRouter.all('/analytics/export-pdf', async (req: Request, res: Response) => {
 });
 
 // Excel Workbook Export Route
-apiRouter.all('/analytics/export-excel', (req: Request, res: Response) => {
-  const { user, student, faculty } = getAuthUser(req);
+apiRouter.all('/analytics/export-excel', async (req: Request, res: Response) => {
+  const { user, student, faculty } = await getAuthUser(req);
   const scope = getAnalyticsUserScope(user, student, faculty);
 
   if (!scope.isAuthorized) {
@@ -1538,8 +1582,8 @@ apiRouter.all('/analytics/export-excel', (req: Request, res: Response) => {
 
 
 // --- CERTIFICATES ROUTES ---
-apiRouter.get("/student/certificates", (req: Request, res: Response) => {
-  const { student } = getAuthUser(req);
+apiRouter.get("/student/certificates", async (req: Request, res: Response) => {
+  const { student } = await getAuthUser(req);
   if (!student) return res.status(401).json({ error: "Student access required" });
   const certs = db.getCertificatesByStudent(student.studentId);
   // Expand with experience details
@@ -1558,16 +1602,16 @@ apiRouter.get("/certificates/:certificateId", (req: Request, res: Response) => {
   res.json({ ...cert, experience, student });
 });
 
-apiRouter.get("/faculty/experiences/:id/certificates", (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get("/faculty/experiences/:id/certificates", async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== "FACULTY" && user?.role !== "ADMIN") return res.status(403).json({ error: "Unauthorized" });
   if (!isFacultyAuthorizedForExperience(user, req.params.id)) return res.status(403).json({ error: "Unauthorized" });
   const certs = db.getCertificatesByExperience(req.params.id);
   res.json(certs);
 });
 
-apiRouter.post("/faculty/experiences/:id/certificates/issue", (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post("/faculty/experiences/:id/certificates/issue", async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== "FACULTY" && user?.role !== "ADMIN") return res.status(403).json({ error: "Unauthorized" });
   if (!isFacultyAuthorizedForExperience(user, req.params.id)) return res.status(403).json({ error: "Unauthorized" });
   const issued = db.issueCertificatesForExperience(req.params.id, user.id);
@@ -1575,8 +1619,8 @@ apiRouter.post("/faculty/experiences/:id/certificates/issue", (req: Request, res
 });
 
 // --- FEEDBACK ROUTES ---
-apiRouter.post('/experiences/:id/feedback', (req: Request, res: Response) => {
-  const { student, user } = getAuthUser(req);
+apiRouter.post('/experiences/:id/feedback', async (req: Request, res: Response) => {
+  const { student, user } = await getAuthUser(req);
   if (!student) return res.status(401).json({ error: 'Student authentication required to submit feedback' });
 
   const experienceId = req.params.id;
@@ -1647,8 +1691,8 @@ apiRouter.post('/experiences/:id/feedback', (req: Request, res: Response) => {
   res.status(201).json(feedback);
 });
 
-apiRouter.get('/experiences/:id/feedback', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/experiences/:id/feedback', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
 
   const list = db.getFeedbackByExperience(req.params.id);
@@ -1656,8 +1700,8 @@ apiRouter.get('/experiences/:id/feedback', (req: Request, res: Response) => {
   res.json({ feedback: list, stats });
 });
 
-apiRouter.get('/student/feedback', (req: Request, res: Response) => {
-  const { student } = getAuthUser(req);
+apiRouter.get('/student/feedback', async (req: Request, res: Response) => {
+  const { student } = await getAuthUser(req);
   if (!student) return res.status(401).json({ error: 'Student access required' });
 
   const list = db.getFeedbackByStudent(student.studentId);
@@ -1667,8 +1711,8 @@ apiRouter.get('/student/feedback', (req: Request, res: Response) => {
 // --- POST-TRIP REPORT & PHOTO SUBMISSION ROUTES ---
 
 // Check eligibility for a visit report
-apiRouter.get('/experiences/:id/report/eligibility', (req: Request, res: Response) => {
-  const { student } = getAuthUser(req);
+apiRouter.get('/experiences/:id/report/eligibility', async (req: Request, res: Response) => {
+  const { student } = await getAuthUser(req);
   if (!student) {
     return res.status(401).json({ error: 'Student authentication required' });
   }
@@ -1678,8 +1722,8 @@ apiRouter.get('/experiences/:id/report/eligibility', (req: Request, res: Respons
 });
 
 // Get student's report for an experience
-apiRouter.get('/experiences/:id/report', (req: Request, res: Response) => {
-  const { user, student, faculty } = getAuthUser(req);
+apiRouter.get('/experiences/:id/report', async (req: Request, res: Response) => {
+  const { user, student, faculty } = await getAuthUser(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
 
   const experienceId = req.params.id;
@@ -1713,8 +1757,8 @@ apiRouter.get('/experiences/:id/report', (req: Request, res: Response) => {
 });
 
 // Submit a student's post-trip report
-apiRouter.post('/experiences/:id/report', (req: Request, res: Response) => {
-  const { student, user } = getAuthUser(req);
+apiRouter.post('/experiences/:id/report', async (req: Request, res: Response) => {
+  const { student, user } = await getAuthUser(req);
   if (!student || !user) {
     return res.status(401).json({ error: 'Student authentication required to submit a post-trip report' });
   }
@@ -1804,8 +1848,8 @@ apiRouter.post('/experiences/:id/report', (req: Request, res: Response) => {
 });
 
 // Delete a photo from report
-apiRouter.delete('/reports/photos/:photoId', (req: Request, res: Response) => {
-  const { student } = getAuthUser(req);
+apiRouter.delete('/reports/photos/:photoId', async (req: Request, res: Response) => {
+  const { student } = await getAuthUser(req);
   if (!student) return res.status(401).json({ error: 'Student authentication required' });
 
   const success = db.deleteReportPhoto(req.params.photoId, student.studentId);
@@ -1816,8 +1860,8 @@ apiRouter.delete('/reports/photos/:photoId', (req: Request, res: Response) => {
 });
 
 // Faculty Post-Trip Reports Dashboard Metrics & List
-apiRouter.get('/faculty/reports', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/faculty/reports', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'FACULTY' && user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Unauthorized' });
   }
@@ -1829,8 +1873,8 @@ apiRouter.get('/faculty/reports', (req: Request, res: Response) => {
 });
 
 // Faculty get single report detail by report ID
-apiRouter.get('/faculty/reports/:reportId', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/faculty/reports/:reportId', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'FACULTY' && user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Unauthorized' });
   }
@@ -1848,8 +1892,8 @@ apiRouter.get('/faculty/reports/:reportId', (req: Request, res: Response) => {
 });
 
 // Admin Post-Trip Reports Dashboard Metrics & List
-apiRouter.get('/admin/reports', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/admin/reports', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -1859,8 +1903,8 @@ apiRouter.get('/admin/reports', (req: Request, res: Response) => {
 });
 
 // Admin get single report detail by report ID
-apiRouter.get('/admin/reports/:reportId', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/admin/reports/:reportId', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -1874,8 +1918,8 @@ apiRouter.get('/admin/reports/:reportId', (req: Request, res: Response) => {
 });
 
 // --- ADMIN SPECIFIC ROUTES ---
-apiRouter.get('/admin/overview', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/admin/overview', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -1884,8 +1928,8 @@ apiRouter.get('/admin/overview', (req: Request, res: Response) => {
   res.json(stats);
 });
 
-apiRouter.get('/admin/students', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/admin/students', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -1894,8 +1938,8 @@ apiRouter.get('/admin/students', (req: Request, res: Response) => {
   res.json(students);
 });
 
-apiRouter.get('/admin/students/:studentId', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/admin/students/:studentId', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -1905,8 +1949,8 @@ apiRouter.get('/admin/students/:studentId', (req: Request, res: Response) => {
   res.json(dossier);
 });
 
-apiRouter.get('/admin/faculty', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/admin/faculty', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN' && user?.role !== 'FACULTY') {
     return res.status(403).json({ error: 'Admin or Faculty access required' });
   }
@@ -1915,8 +1959,8 @@ apiRouter.get('/admin/faculty', (req: Request, res: Response) => {
   res.json(facultyList);
 });
 
-apiRouter.post('/admin/faculty', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/admin/faculty', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -1938,8 +1982,8 @@ apiRouter.post('/admin/faculty', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/admin/faculty/:userId/toggle-status', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/admin/faculty/:userId/toggle-status', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -1949,8 +1993,8 @@ apiRouter.post('/admin/faculty/:userId/toggle-status', (req: Request, res: Respo
   res.json(updated);
 });
 
-apiRouter.get('/admin/registrations', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/admin/registrations', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -1959,8 +2003,8 @@ apiRouter.get('/admin/registrations', (req: Request, res: Response) => {
   res.json(regs);
 });
 
-apiRouter.post('/admin/registrations/:id/promote', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/admin/registrations/:id/promote', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -1973,8 +2017,8 @@ apiRouter.post('/admin/registrations/:id/promote', (req: Request, res: Response)
   }
 });
 
-apiRouter.post('/admin/registrations/:id/cancel', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/admin/registrations/:id/cancel', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -1987,8 +2031,8 @@ apiRouter.post('/admin/registrations/:id/cancel', (req: Request, res: Response) 
   }
 });
 
-apiRouter.get('/admin/leaves', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/admin/leaves', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -1997,8 +2041,8 @@ apiRouter.get('/admin/leaves', (req: Request, res: Response) => {
   res.json(leaves);
 });
 
-apiRouter.post('/admin/leaves/:id/override', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/admin/leaves/:id/override', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -2025,8 +2069,8 @@ apiRouter.post('/admin/leaves/:id/override', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.get('/admin/attendance', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/admin/attendance', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -2035,8 +2079,8 @@ apiRouter.get('/admin/attendance', (req: Request, res: Response) => {
   res.json(overview);
 });
 
-apiRouter.get('/admin/documents', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/admin/documents', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -2045,8 +2089,8 @@ apiRouter.get('/admin/documents', (req: Request, res: Response) => {
   res.json(docs);
 });
 
-apiRouter.get('/admin/announcements', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/admin/announcements', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -2055,8 +2099,8 @@ apiRouter.get('/admin/announcements', (req: Request, res: Response) => {
   res.json(anns);
 });
 
-apiRouter.post('/admin/announcements', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/admin/announcements', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -2080,8 +2124,8 @@ apiRouter.post('/admin/announcements', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.delete('/admin/announcements/:id', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.delete('/admin/announcements/:id', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -2090,8 +2134,8 @@ apiRouter.delete('/admin/announcements/:id', (req: Request, res: Response) => {
   res.json({ success: ok });
 });
 
-apiRouter.get('/admin/users', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/admin/users', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -2100,8 +2144,8 @@ apiRouter.get('/admin/users', (req: Request, res: Response) => {
   res.json(users);
 });
 
-apiRouter.post('/admin/users', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/admin/users', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -2114,8 +2158,8 @@ apiRouter.post('/admin/users', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.put('/admin/users/:id', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.put('/admin/users/:id', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -2128,8 +2172,8 @@ apiRouter.put('/admin/users/:id', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/admin/users/:id/toggle-status', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/admin/users/:id/toggle-status', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -2142,8 +2186,8 @@ apiRouter.post('/admin/users/:id/toggle-status', (req: Request, res: Response) =
   }
 });
 
-apiRouter.post('/admin/experiences/:id/approve', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/admin/experiences/:id/approve', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -2156,8 +2200,8 @@ apiRouter.post('/admin/experiences/:id/approve', (req: Request, res: Response) =
   }
 });
 
-apiRouter.post('/admin/experiences/:id/reject', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/admin/experiences/:id/reject', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -2175,8 +2219,8 @@ apiRouter.post('/admin/experiences/:id/reject', (req: Request, res: Response) =>
   }
 });
 
-apiRouter.post('/admin/experiences/:id/duplicate', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/admin/experiences/:id/duplicate', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -2189,8 +2233,8 @@ apiRouter.post('/admin/experiences/:id/duplicate', (req: Request, res: Response)
   }
 });
 
-apiRouter.post('/admin/experiences/:id/assign-faculty', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/admin/experiences/:id/assign-faculty', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -2203,13 +2247,13 @@ apiRouter.post('/admin/experiences/:id/assign-faculty', (req: Request, res: Resp
   }
 });
 
-apiRouter.get('/admin/settings', (req: Request, res: Response) => {
+apiRouter.get('/admin/settings', async (req: Request, res: Response) => {
   const settings = db.getSettings();
   res.json(settings);
 });
 
-apiRouter.post('/admin/settings', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/admin/settings', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -2218,12 +2262,12 @@ apiRouter.post('/admin/settings', (req: Request, res: Response) => {
   res.json(updated);
 });
 
-apiRouter.get('/admin/templates', (req: Request, res: Response) => {
+apiRouter.get('/admin/templates', async (req: Request, res: Response) => {
   res.json(db.getTemplates());
 });
 
-apiRouter.post('/admin/templates', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/admin/templates', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN' && user?.role !== 'FACULTY') {
     return res.status(403).json({ error: 'Unauthorized' });
   }
@@ -2232,8 +2276,8 @@ apiRouter.post('/admin/templates', (req: Request, res: Response) => {
   res.status(201).json(tpl);
 });
 
-apiRouter.put('/admin/templates/:id', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.put('/admin/templates/:id', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN' && user?.role !== 'FACULTY') {
     return res.status(403).json({ error: 'Unauthorized' });
   }
@@ -2245,8 +2289,8 @@ apiRouter.put('/admin/templates/:id', (req: Request, res: Response) => {
   res.json(tpl);
 });
 
-apiRouter.post('/admin/templates/:id/record-usage', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/admin/templates/:id/record-usage', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (!user) {
     return res.status(403).json({ error: 'Unauthorized' });
   }
@@ -2255,8 +2299,8 @@ apiRouter.post('/admin/templates/:id/record-usage', (req: Request, res: Response
   res.json({ success: true });
 });
 
-apiRouter.delete('/admin/templates/:id', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.delete('/admin/templates/:id', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Unauthorized' });
   }
@@ -2265,8 +2309,8 @@ apiRouter.delete('/admin/templates/:id', (req: Request, res: Response) => {
   res.json({ success: ok });
 });
 
-apiRouter.get('/admin/audit-logs', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/admin/audit-logs', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     db.addSecurityEvent({
       eventType: 'UNAUTHORIZED_ACCESS',
@@ -2301,8 +2345,8 @@ apiRouter.get('/admin/audit-logs', (req: Request, res: Response) => {
   res.json(result);
 });
 
-apiRouter.get('/admin/security-events', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/admin/security-events', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     db.addSecurityEvent({
       eventType: 'UNAUTHORIZED_ACCESS',
@@ -2337,8 +2381,8 @@ apiRouter.get('/admin/security-events', (req: Request, res: Response) => {
   res.json(result);
 });
 
-apiRouter.get('/admin/security-stats', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/admin/security-stats', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -2349,7 +2393,7 @@ apiRouter.get('/admin/security-stats', (req: Request, res: Response) => {
 
 // --- AI ASSISTANT CHAT ROUTE ---
 apiRouter.post('/ai/chat', async (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+  const { user } = await getAuthUser(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
   const { prompt, history, currentExperienceId } = req.body;
@@ -2372,7 +2416,7 @@ apiRouter.post('/ai/chat', async (req: Request, res: Response) => {
 });
 
 apiRouter.get('/ai/recommendations', async (req: Request, res: Response) => {
-  const { student, user } = getAuthUser(req);
+  const { student, user } = await getAuthUser(req);
   const studentId = student?.studentId || (req.query.studentId as string) || '21BCE10482';
 
   try {
@@ -2384,7 +2428,7 @@ apiRouter.get('/ai/recommendations', async (req: Request, res: Response) => {
 });
 
 apiRouter.post('/ai/faculty-helper', async (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'FACULTY' && user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Faculty or Admin access required' });
   }
@@ -2398,7 +2442,7 @@ apiRouter.post('/ai/faculty-helper', async (req: Request, res: Response) => {
 });
 
 apiRouter.get('/ai/admin-insights', async (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -2413,7 +2457,7 @@ apiRouter.get('/ai/admin-insights', async (req: Request, res: Response) => {
 
 // AI Visit Content Generation Endpoint
 const handleVisitContentGen = async (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+  const { user } = await getAuthUser(req);
   if (!user || (user.role !== 'FACULTY' && user.role !== 'ADMIN')) {
     return res.status(403).json({ error: 'Only Faculty and Admin are authorized to generate visit content.' });
   }
@@ -2440,8 +2484,8 @@ apiRouter.post('/ai/generate-visit-content', handleVisitContentGen);
 // PHASE 2: SECURITY NOTIFICATION RECIPIENTS (Admin Controlled)
 // =========================================================================
 
-apiRouter.get('/admin/security-recipients', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.get('/admin/security-recipients', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin authorization required to view security recipient configuration' });
   }
@@ -2450,8 +2494,8 @@ apiRouter.get('/admin/security-recipients', (req: Request, res: Response) => {
   res.json(recipients);
 });
 
-apiRouter.post('/admin/security-recipients', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.post('/admin/security-recipients', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin authorization required to manage security posts' });
   }
@@ -2488,8 +2532,8 @@ apiRouter.post('/admin/security-recipients', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.put('/admin/security-recipients/:id', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.put('/admin/security-recipients/:id', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin authorization required to manage security posts' });
   }
@@ -2516,8 +2560,8 @@ apiRouter.put('/admin/security-recipients/:id', (req: Request, res: Response) =>
   }
 });
 
-apiRouter.delete('/admin/security-recipients/:id', (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+apiRouter.delete('/admin/security-recipients/:id', async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
   if (user?.role !== 'ADMIN') {
     return res.status(403).json({ error: 'Admin authorization required to manage security posts' });
   }
@@ -2551,13 +2595,13 @@ apiRouter.delete('/admin/security-recipients/:id', (req: Request, res: Response)
  * 2. Google Cloud Scheduler native headers (X-CloudScheduler, X-AppEngine-Cron) and OIDC token.
  * 3. Authenticated Admin / Faculty user sessions.
  */
-function validateSchedulerAuth(req: Request): {
+async function validateSchedulerAuth(req: Request): Promise<{
   authorized: boolean;
   triggerSource: string;
   user?: any;
   error?: string;
   statusCode?: number;
-} {
+}> {
   const cronSecret = process.env.CRON_SECRET || process.env.SCHEDULER_SECRET;
   const authHeader = req.headers.authorization;
   const customSecretHeader = (req.headers['x-scheduler-secret'] || req.headers['x-cron-secret']) as string | undefined;
@@ -2580,7 +2624,7 @@ function validateSchedulerAuth(req: Request): {
   }
 
   // 3. Verify Admin / Faculty logged-in session
-  const auth = getAuthUser(req);
+  const auth = await getAuthUser(req);
   if (auth.user && (auth.user.role === 'ADMIN' || auth.user.role === 'FACULTY')) {
     return {
       authorized: true,
@@ -2607,7 +2651,7 @@ function validateSchedulerAuth(req: Request): {
  * Called daily by Cloud Scheduler to wake the container and dispatch due 3-day reminders.
  */
 apiRouter.all(['/scheduler/trigger-reminders', '/scheduler/pre-trip-reminders', '/cron/trigger-reminders'], async (req: Request, res: Response) => {
-  const authCheck = validateSchedulerAuth(req);
+  const authCheck = await validateSchedulerAuth(req);
   if (!authCheck.authorized) {
     return res.status(authCheck.statusCode || 401).json({
       success: false,
@@ -2650,7 +2694,7 @@ apiRouter.all(['/scheduler/trigger-reminders', '/scheduler/pre-trip-reminders', 
   }
 });
 
-apiRouter.get('/reminders/status', (req: Request, res: Response) => {
+apiRouter.get('/reminders/status', async (req: Request, res: Response) => {
   const status = getSchedulerStatus();
   const allExperiences = db.getAllExperiences();
   
@@ -2690,7 +2734,7 @@ apiRouter.get('/reminders/status', (req: Request, res: Response) => {
 });
 
 apiRouter.post('/reminders/run-now', async (req: Request, res: Response) => {
-  const authCheck = validateSchedulerAuth(req);
+  const authCheck = await validateSchedulerAuth(req);
   if (!authCheck.authorized) {
     return res.status(authCheck.statusCode || 403).json({
       error: authCheck.error || 'Authorization required to trigger reminders',
@@ -2722,12 +2766,12 @@ apiRouter.post('/reminders/run-now', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.get('/reminders/history', (req: Request, res: Response) => {
+apiRouter.get('/reminders/history', async (req: Request, res: Response) => {
   const records = db.getTripReminders();
   res.json(records);
 });
 
-apiRouter.get('/experiences/:id/reminder-preview', (req: Request, res: Response) => {
+apiRouter.get('/experiences/:id/reminder-preview', async (req: Request, res: Response) => {
   const exp = db.getExperienceById(req.params.id);
   if (!exp) {
     return res.status(404).json({ error: 'Industrial visit not found' });
@@ -2785,7 +2829,7 @@ apiRouter.get('/experiences/:id/reminder-preview', (req: Request, res: Response)
 });
 
 apiRouter.post('/experiences/:id/send-3day-reminder', async (req: Request, res: Response) => {
-  const { user } = getAuthUser(req);
+  const { user } = await getAuthUser(req);
   if (user && user.role !== 'ADMIN' && user.role !== 'FACULTY') {
     return res.status(403).json({ error: 'Admin or Faculty access required' });
   }
