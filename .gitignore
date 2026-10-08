@@ -9,3 +9,17 @@ coverage/
 !.env.example
 *.db
 *.db-journal
+
+# AI IDE tool configs (not part of project)
+.agent/
+.agents/
+.claude/
+.cursor/
+.devin/
+.gemini/
+.gsd/
+adapters/
+GSD-STYLE.md
+VERSION
+model_capabilities.yaml
+scripts/
