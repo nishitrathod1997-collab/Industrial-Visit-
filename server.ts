@@ -3,8 +3,10 @@ import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { apiRouter } from './server/routes';
 import { db } from './server/db';
+import { prisma } from './server/db';
 import { initReminderScheduler } from './server/scheduler';
 import { initEmailWorker } from './server/emailWorker';
+import { ensureDemoAccounts } from './server/seedDemo';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -16,6 +18,9 @@ async function startServer() {
   // Initialize background email queue dispatcher and 3-Day reminder scheduler
   initEmailWorker(db);
   initReminderScheduler(db);
+
+  // Ensure demo accounts are always operational (self-healing on every startup)
+  await ensureDemoAccounts(prisma);
 
   // Body parsers with generous limits for uploads, documents, signatures and images
   app.use(express.json({ limit: '50mb' }));
