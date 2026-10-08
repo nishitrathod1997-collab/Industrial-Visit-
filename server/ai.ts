@@ -33,7 +33,7 @@ async function callGroqAPI(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'llama3-70b-8192',
+        model: 'qwen/qwen3.8-27b',
         messages,
         temperature: 0.2,
         ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
