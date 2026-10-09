@@ -9,6 +9,7 @@ interface AuthContextType {
   role: UserRole | null;
   loading: boolean;
   unreadNotificationCount: number;
+  unreadNotificationsCount: number;
   login: (data: { identifier?: string; email?: string; password?: string; role?: string }) => Promise<void>;
   logout: () => Promise<void>;
   switchUser: (userId: string) => Promise<void>;

@@ -30,17 +30,24 @@ const DEMO_ACCOUNTS = [
     role: 'STUDENT' as const,
     studentId: '23EC001',
     department: 'Electronics & Computer Science',
+    branch: 'Electronics & Computer Science',
     year: 3,
+    semester: 5,
     division: 'A',
     cgpa: 8.7,
+    phone: '+91 98201 45678',
+    prn: 'PRN202300001',
   },
   {
     id: 'usr_faculty_1',
     name: 'Dr. Arvind Swaminathan',
     email: 'arvind.swaminathan@vit.edu.in',
     role: 'FACULTY' as const,
+    facultyId: 'FAC001',
     department: 'Electronics & Computer Science',
     designation: 'Associate Professor',
+    employeeCode: 'EMP001',
+    phone: '+91 98400 11223',
   },
   {
     id: 'usr_admin_1',
@@ -51,15 +58,21 @@ const DEMO_ACCOUNTS = [
 ];
 
 export async function ensureDemoAccounts(prisma: PrismaClient) {
-  console.log('[DemoSeed] Ensuring demo accounts are operational...');
+  // Never seed demo accounts in production unless explicitly enabled via environment variable
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_DEMO_ACCOUNTS !== 'true') {
+    console.log('[DemoSeed] Production mode: Demo account auto-seeding is disabled.');
+    return;
+  }
+
+  console.log('[DemoSeed] Checking demo accounts...');
 
   for (const account of DEMO_ACCOUNTS) {
     try {
       const existing = await prisma.user.findUnique({ where: { id: account.id } });
-      const { hash, salt } = hashPassword(DEMO_PASSWORD);
 
       if (!existing) {
-        // Create from scratch
+        const { hash, salt } = hashPassword(DEMO_PASSWORD);
+        // Create demo account only if it does not exist
         await prisma.user.create({
           data: {
             id: account.id,
@@ -79,97 +92,41 @@ export async function ensureDemoAccounts(prisma: PrismaClient) {
             create: {
               userId: account.id,
               studentId: account.studentId,
+              branch: account.branch,
               department: account.department,
               year: account.year,
+              semester: account.semester,
               division: account.division,
               cgpa: account.cgpa,
+              phone: account.phone,
+              prn: account.prn,
             },
             update: {},
           });
-        } else if (account.role === 'FACULTY' && 'department' in account) {
+        } else if (account.role === 'FACULTY' && 'facultyId' in account) {
           await prisma.facultyProfile.upsert({
             where: { userId: account.id },
             create: {
               userId: account.id,
+              facultyId: account.facultyId,
               department: account.department,
               designation: account.designation,
+              employeeCode: account.employeeCode,
+              phone: account.phone,
             },
             update: {},
           });
         }
 
-        console.log(`[DemoSeed]  ✓ Created demo ${account.role}: ${account.email}`);
+        console.log(`[DemoSeed]  ✓ Created initial demo ${account.role}: ${account.email}`);
       } else {
-        // Always ensure email and password are correct
-        const needsUpdate =
-          existing.email !== account.email ||
-          existing.name !== account.name ||
-          existing.status !== 'ACTIVE';
-
-        if (needsUpdate) {
-          await prisma.user.update({
-            where: { id: account.id },
-            data: {
-              email: account.email,
-              name: account.name,
-              status: 'ACTIVE',
-              passwordHash: hash,
-              salt: salt,
-            },
-          });
-          console.log(`[DemoSeed]  ✓ Repaired demo ${account.role}: ${account.email}`);
-        } else {
-          console.log(`[DemoSeed]  ✓ OK demo ${account.role}: ${account.email}`);
-        }
+        // If demo account exists, do NOT overwrite its password or active status if already set
+        console.log(`[DemoSeed]  ✓ Demo account exists: ${account.email}`);
       }
     } catch (err: any) {
-      // Email conflict — another user has taken this email; fix it
-      if (err?.code === 'P2002') {
-        const conflicting = await prisma.user.findFirst({ where: { email: account.email } });
-        if (conflicting && conflicting.id !== account.id) {
-          // Move the conflicting user's email away
-          await prisma.user.update({
-            where: { id: conflicting.id },
-            data: { email: `conflict_${conflicting.id}@vit.edu.in` },
-          });
-          // Now update the real demo account
-          const { hash, salt } = hashPassword(DEMO_PASSWORD);
-          await prisma.user.update({
-            where: { id: account.id },
-            data: {
-              email: account.email,
-              name: account.name,
-              status: 'ACTIVE',
-              passwordHash: hash,
-              salt: salt,
-            },
-          });
-          console.log(`[DemoSeed]  ✓ Fixed conflict and repaired ${account.role}: ${account.email}`);
-        }
-      } else {
-        console.error(`[DemoSeed]  ✗ Error seeding ${account.role}:`, err?.message || err);
-      }
+      console.error(`[DemoSeed]  ✗ Error inspecting demo account ${account.role}:`, err?.message || err);
     }
   }
 
-  console.log('[DemoSeed] All demo accounts are operational.');
-
-  // Also fix any other seeded accounts that are missing a password
-  // This ensures ALL accounts in the system are always loginable with Password@123
-  const noPasswordUsers = await prisma.user.findMany({
-    where: { OR: [{ passwordHash: null }, { salt: null }] },
-    select: { id: true }
-  });
-
-  if (noPasswordUsers.length > 0) {
-    console.log(`[DemoSeed] Fixing ${noPasswordUsers.length} accounts with no password...`);
-    for (const user of noPasswordUsers) {
-      const { hash, salt } = hashPassword(DEMO_PASSWORD);
-      await prisma.user.update({
-        where: { id: user.id },
-        data: { passwordHash: hash, salt: salt, status: 'ACTIVE' }
-      });
-    }
-    console.log('[DemoSeed] All missing passwords set to Password@123.');
-  }
+  console.log('[DemoSeed] Demo account check complete.');
 }

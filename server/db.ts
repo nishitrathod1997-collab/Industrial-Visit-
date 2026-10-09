@@ -1,8 +1,7 @@
 import fs from 'fs';
 import path from 'path';
-import { PrismaClient } from '@prisma/client';
-
-export const prisma = new PrismaClient();
+import { prisma } from './prisma';
+export { prisma };
 import {
   User,
   StudentProfile,
@@ -1409,26 +1408,498 @@ class DatabaseService {
       } else {
         currentData = getInitialData();
       }
-    } catch (err) {
-      console.error('Error loading database from file, generating defaults:', err);
+    } catch {
       currentData = getInitialData();
     }
-    const synced = this.ensureScenariosAndCohorts(currentData);
-    this.saveDatabaseData(synced);
-    return synced;
+    return this.ensureScenariosAndCohorts(currentData);
   }
 
-  private saveDatabaseData(dataToSave: DatabaseSchema) {
+  /**
+   * Loads authoritative data from the persistent Prisma database.
+   * Completely supersedes legacy JSON database at runtime.
+   */
+  public async initializeFromPrisma(): Promise<void> {
     try {
-      this.ensureDataDir();
-      fs.writeFileSync(DB_FILE, JSON.stringify(dataToSave, null, 2), 'utf-8');
-    } catch (err) {
-      console.error('Error saving database:', err);
+      const userCount = await prisma.user.count();
+      if (userCount === 0) {
+        console.log('[DatabaseService] Authoritative Prisma store is unpopulated.');
+        return;
+      }
+
+      const [
+        pUsers,
+        pStudents,
+        pFaculty,
+        pExperiences,
+        pRegistrations,
+        pWaitlist,
+        pAttendance,
+        pBoardingPasses,
+        pLeaveRequests,
+        pNotifications,
+        pEmailLogs,
+        pAnnouncements,
+        pTemplates,
+        pAuditLogs,
+        pSecurityEvents,
+        pSettings,
+        pCertificates,
+        pFeedback,
+        pSecurityRecipients,
+        pTripReminders,
+        pReports,
+        pReportPhotos,
+      ] = await Promise.all([
+        prisma.user.findMany(),
+        prisma.studentProfile.findMany(),
+        prisma.facultyProfile.findMany(),
+        prisma.experience.findMany(),
+        prisma.registration.findMany(),
+        prisma.waitlistEntry.findMany(),
+        prisma.attendanceRecord.findMany(),
+        prisma.boardingPass.findMany(),
+        prisma.leaveRequest.findMany(),
+        prisma.appNotification.findMany(),
+        prisma.emailNotification.findMany(),
+        prisma.announcement.findMany(),
+        prisma.experienceTemplate.findMany(),
+        prisma.auditLog.findMany(),
+        prisma.securityEvent.findMany(),
+        prisma.globalSettings.findFirst(),
+        prisma.certificate.findMany(),
+        prisma.experienceFeedback.findMany(),
+        prisma.securityRecipient.findMany(),
+        prisma.tripReminderRecord.findMany(),
+        prisma.tripReport.findMany(),
+        prisma.tripReportPhoto.findMany(),
+      ]);
+
+      // Map users
+      this.data.users = pUsers.map((u) => ({
+        id: u.id,
+        name: u.name,
+        email: u.email,
+        role: u.role as any,
+        status: u.status as any,
+        passwordHash: u.passwordHash || undefined,
+        salt: u.salt || undefined,
+        avatar: u.avatar || undefined,
+        createdAt: u.createdAt.toISOString(),
+        updatedAt: u.updatedAt.toISOString(),
+        consentStatus: (u.consentStatus as any) || undefined,
+        consentDocumentUrl: u.consentDocumentUrl || undefined,
+        consentRejectionReason: u.consentRejectionReason || undefined,
+        consentUploadedAt: u.consentUploadedAt ? u.consentUploadedAt.toISOString() : undefined,
+        tokenVersion: u.tokenVersion,
+      }));
+
+      // Map students
+      this.data.students = pStudents.map((s) => ({
+        studentId: s.studentId,
+        userId: s.userId,
+        name: this.data.users.find((u) => u.id === s.userId)?.name || '',
+        email: this.data.users.find((u) => u.id === s.userId)?.email || '',
+        branch: s.branch,
+        year: s.year,
+        semester: s.semester,
+        division: s.division,
+        department: s.department,
+        cgpa: s.cgpa,
+        phone: s.phone,
+        prn: s.prn,
+        activeBacklogs: s.activeBacklogs,
+        attendancePercentage: s.attendancePercentage,
+      }));
+
+      // Map faculty
+      this.data.faculty = pFaculty.map((f) => ({
+        facultyId: f.facultyId,
+        userId: f.userId,
+        name: this.data.users.find((u) => u.id === f.userId)?.name || '',
+        email: this.data.users.find((u) => u.id === f.userId)?.email || '',
+        department: f.department,
+        designation: f.designation,
+        employeeCode: f.employeeCode,
+        phone: f.phone,
+        status: f.status as any,
+      }));
+
+      // Map experiences
+      this.data.experiences = pExperiences.map((e) => ({
+        id: e.id,
+        title: e.title,
+        organization: e.organization,
+        organizationDescription: e.organizationDescription,
+        organizationIndustry: e.organizationIndustry,
+        organizationWebsite: e.organizationWebsite,
+        organizationLogo: e.organizationLogo || undefined,
+        experienceType: e.experienceType as any,
+        shortDescription: e.shortDescription,
+        detailedDescription: e.detailedDescription,
+        image: e.image || undefined,
+        date: e.date.toISOString().split('T')[0],
+        endDate: e.endDate || undefined,
+        time: e.time || undefined,
+        duration: e.duration || undefined,
+        learningHours: e.learningHours || undefined,
+        location: e.location,
+        address: e.address,
+        city: e.city || undefined,
+        state: e.state || undefined,
+        country: e.country || undefined,
+        latitude: e.latitude || undefined,
+        longitude: e.longitude || undefined,
+        googleMapsUrl: e.googleMapsUrl || undefined,
+        contribution: e.contribution,
+        capacity: e.capacity,
+        waitlistEnabled: e.waitlistEnabled,
+        waitlistCapacity: e.waitlistCapacity,
+        registrationOpen: e.registrationOpen.toISOString(),
+        registrationDeadline: e.registrationDeadline.toISOString(),
+        status: e.status as any,
+        createdBy: e.createdBy,
+        primaryFacultyId: e.primaryFacultyId,
+        additionalFacultyIds: e.additionalFacultyIds ? JSON.parse(e.additionalFacultyIds) : undefined,
+        createdAt: e.createdAt.toISOString(),
+        updatedAt: e.updatedAt.toISOString(),
+        submittedAt: e.submittedAt ? e.submittedAt.toISOString() : undefined,
+        approvedBy: e.approvedBy || undefined,
+        approvedAt: e.approvedAt ? e.approvedAt.toISOString() : undefined,
+        rejectedBy: e.rejectedBy || undefined,
+        rejectedAt: e.rejectedAt ? e.rejectedAt.toISOString() : undefined,
+        rejectionReason: e.rejectionReason || undefined,
+        publishedBy: e.publishedBy || undefined,
+        publishedAt: e.publishedAt ? e.publishedAt.toISOString() : undefined,
+        consentStatus: (e.consentStatus as any) || undefined,
+        consentDocumentUrl: e.consentDocumentUrl || undefined,
+        consentRejectionReason: e.consentRejectionReason || undefined,
+        consentUploadedAt: e.consentUploadedAt ? e.consentUploadedAt.toISOString() : undefined,
+        eligibility: e.eligibility ? JSON.parse(e.eligibility) : ({} as any),
+        whatYouWillLearn: e.whatYouWillLearn ? JSON.parse(e.whatYouWillLearn) : [],
+        learningObjectives: e.learningObjectives ? JSON.parse(e.learningObjectives) : [],
+        itinerary: e.itinerary ? JSON.parse(e.itinerary) : [],
+        travelInfo: e.travelInfo ? JSON.parse(e.travelInfo) : ({} as any),
+        requirements: e.requirements ? JSON.parse(e.requirements) : [],
+        rules: e.rules ? JSON.parse(e.rules) : [],
+        experienceHighlights: e.experienceHighlights ? JSON.parse(e.experienceHighlights) : undefined,
+        whyAttend: e.whyAttend ? JSON.parse(e.whyAttend) : undefined,
+        safetyInfo: e.safetyInfo ? JSON.parse(e.safetyInfo) : undefined,
+        companyInfo: e.companyInfo ? JSON.parse(e.companyInfo) : undefined,
+      }));
+
+      // Map registrations
+      this.data.registrations = pRegistrations.map((r) => ({
+        id: r.id,
+        studentId: r.studentId,
+        experienceId: r.experienceId,
+        status: r.status as any,
+        registeredAt: r.registeredAt.toISOString(),
+        cancelledAt: r.cancelledAt ? r.cancelledAt.toISOString() : undefined,
+        updatedAt: r.updatedAt.toISOString(),
+        consentStatus: (r.consentStatus as any) || undefined,
+        consentDocumentUrl: r.consentDocumentUrl || undefined,
+        consentRejectionReason: r.consentRejectionReason || undefined,
+        consentUploadedAt: r.consentUploadedAt ? r.consentUploadedAt.toISOString() : undefined,
+        consentVerifiedAt: r.consentVerifiedAt ? r.consentVerifiedAt.toISOString() : undefined,
+        consentValidationResult: r.consentValidationResult ? JSON.parse(r.consentValidationResult) : undefined,
+        eligibilitySnapshot: r.eligibilitySnapshot ? JSON.parse(r.eligibilitySnapshot) : undefined,
+      }));
+
+      // Map waitlist
+      this.data.waitlist = pWaitlist.map((w) => ({
+        id: w.id,
+        studentId: w.studentId,
+        experienceId: w.experienceId,
+        position: w.position,
+        joinedAt: w.joinedAt.toISOString(),
+        status: w.status as any,
+      }));
+
+      // Map attendance
+      this.data.attendance = pAttendance.map((a) => ({
+        id: a.id,
+        studentId: a.studentId || undefined,
+        facultyId: a.facultyId || undefined,
+        experienceId: a.experienceId,
+        status: a.status as any,
+        markedBy: a.markedBy,
+        timestamp: a.timestamp.toISOString(),
+        notes: a.notes || undefined,
+      }));
+
+      // Map boarding passes
+      this.data.boardingPasses = pBoardingPasses.map((bp) => ({
+        id: bp.id,
+        studentId: bp.studentId,
+        experienceId: bp.experienceId,
+        passNumber: bp.passNumber,
+        qrData: bp.qrData,
+        generatedAt: bp.generatedAt.toISOString(),
+        status: bp.status as any,
+      }));
+
+      // Map leave requests
+      this.data.leaveRequests = pLeaveRequests.map((lr) => ({
+        id: lr.id,
+        studentId: lr.studentId,
+        experienceId: lr.experienceId,
+        category: lr.category || undefined,
+        reason: lr.reason,
+        supportingDocument: lr.supportingDocument ? JSON.parse(lr.supportingDocument) : undefined,
+        status: lr.status as any,
+        submittedAt: lr.submittedAt.toISOString(),
+        reviewedBy: lr.reviewedBy || undefined,
+        reviewedAt: lr.reviewedAt ? lr.reviewedAt.toISOString() : undefined,
+        reviewNotes: lr.reviewNotes || undefined,
+      }));
+
+      // Map notifications
+      this.data.notifications = pNotifications.map((n) => ({
+        id: n.id,
+        recipientId: n.recipientId,
+        type: n.type as any,
+        title: n.title,
+        message: n.message,
+        read: n.read,
+        createdAt: n.createdAt.toISOString(),
+        readAt: n.readAt ? n.readAt.toISOString() : undefined,
+        priority: (n.priority as any) || undefined,
+        category: (n.category as any) || undefined,
+        relatedEntityId: n.relatedEntityId || undefined,
+        entityType: (n.entityType as any) || undefined,
+        actionUrl: n.actionUrl || undefined,
+        actionLabel: n.actionLabel || undefined,
+        emailStatus: (n.emailStatus as any) || undefined,
+        emailRecipient: n.emailRecipient || undefined,
+        emailSentAt: n.emailSentAt ? n.emailSentAt.toISOString() : undefined,
+      }));
+
+      // Map email logs
+      this.data.emailLogs = pEmailLogs.map((el) => ({
+        id: el.id,
+        studentId: el.studentId || undefined,
+        tripId: el.tripId || undefined,
+        notificationId: el.notificationId || undefined,
+        eventType: el.eventType,
+        recipientEmail: el.recipientEmail,
+        recipientName: el.recipientName,
+        recipientRole: (el.recipientRole as any) || undefined,
+        subject: el.subject,
+        status: el.status as any,
+        attempts: el.attempts,
+        sentAt: el.sentAt ? el.sentAt.toISOString() : undefined,
+        lastAttemptAt: el.lastAttemptAt ? el.lastAttemptAt.toISOString() : undefined,
+        errorMessage: el.errorMessage || undefined,
+        createdAt: el.createdAt.toISOString(),
+        idempotencyKey: el.idempotencyKey || undefined,
+      }));
+
+      // Map announcements
+      this.data.announcements = pAnnouncements.map((an) => ({
+        id: an.id,
+        experienceId: an.experienceId,
+        createdBy: an.createdBy,
+        authorName: an.authorName,
+        title: an.title,
+        message: an.message,
+        createdAt: an.createdAt.toISOString(),
+        targetAudience: (an.targetAudience as any) || undefined,
+        recipientCount: an.recipientCount || undefined,
+        emailDeliveredCount: an.emailDeliveredCount || undefined,
+      }));
+
+      // Map templates
+      this.data.templates = pTemplates.map((t) => ({
+        id: t.id,
+        name: t.name,
+        category: t.category as any,
+        description: t.description,
+        configuration: t.configuration ? JSON.parse(t.configuration) : {},
+        createdBy: t.createdBy,
+        createdAt: t.createdAt.toISOString(),
+        status: (t.status as any) || undefined,
+        timesUsed: t.timesUsed || undefined,
+        lastUsedAt: t.lastUsedAt ? t.lastUsedAt.toISOString() : undefined,
+      }));
+
+      // Map audit logs
+      this.data.auditLogs = pAuditLogs.map((al) => ({
+        id: al.id,
+        timestamp: al.timestamp.toISOString(),
+        action: al.action,
+        module: (al.module as any) || undefined,
+        actorId: al.actorId || undefined,
+        actorName: al.actorName || undefined,
+        actorEmail: al.actorEmail || undefined,
+        actorRole: (al.actorRole as any) || undefined,
+        performedBy: al.performedBy || undefined,
+        performedByName: al.performedByName || undefined,
+        userRole: (al.userRole as any) || undefined,
+        targetId: al.targetId || undefined,
+        targetName: al.targetName || undefined,
+        entityId: al.entityId || undefined,
+        entityType: al.entityType || undefined,
+        description: al.description || undefined,
+        details: al.details ? (al.details.startsWith('{') || al.details.startsWith('[') ? JSON.parse(al.details) : al.details) : undefined,
+        status: (al.status as any) || undefined,
+        metadata: al.metadata ? JSON.parse(al.metadata) : undefined,
+        ipAddress: al.ipAddress || undefined,
+        userAgent: al.userAgent || undefined,
+      }));
+
+      // Map security events
+      this.data.securityEvents = pSecurityEvents.map((se) => ({
+        id: se.id,
+        timestamp: se.timestamp.toISOString(),
+        eventType: se.eventType,
+        actorEmail: se.actorEmail,
+        actorId: se.actorId || undefined,
+        actorName: se.actorName || undefined,
+        actorRole: (se.actorRole as any) || 'UNKNOWN',
+        resource: se.resource,
+        actionAttempted: se.actionAttempted,
+        severity: se.severity as any,
+        status: se.status as any,
+        reason: se.reason || undefined,
+        description: se.description,
+        ipAddress: se.ipAddress || undefined,
+        userAgent: se.userAgent || undefined,
+        metadata: se.metadata ? JSON.parse(se.metadata) : undefined,
+      }));
+
+      // Map settings
+      if (pSettings) {
+        this.data.settings = {
+          attendanceThresholdGood: pSettings.attendanceThresholdGood,
+          attendanceThresholdWarning: pSettings.attendanceThresholdWarning,
+          academicYear: pSettings.academicYear,
+          currentSemester: pSettings.currentSemester,
+          allowedBranches: pSettings.allowedBranches ? JSON.parse(pSettings.allowedBranches) : [],
+          experienceTypes: pSettings.experienceTypes ? JSON.parse(pSettings.experienceTypes) : [],
+          autoPromotionEnabled: pSettings.autoPromotionEnabled,
+          allowStudentLeaveRequests: pSettings.allowStudentLeaveRequests,
+        };
+      }
+
+      // Map certificates
+      this.data.certificates = pCertificates.map((c) => ({
+        id: c.id,
+        certificateId: c.certificateId,
+        studentId: c.studentId,
+        experienceId: c.experienceId,
+        status: c.status as any,
+        issuedAt: c.issuedAt ? c.issuedAt.toISOString() : undefined,
+        issuedBy: c.issuedBy || undefined,
+        createdAt: c.createdAt.toISOString(),
+        updatedAt: c.updatedAt.toISOString(),
+        consentStatus: (c.consentStatus as any) || undefined,
+        consentDocumentUrl: c.consentDocumentUrl || undefined,
+        consentRejectionReason: c.consentRejectionReason || undefined,
+        consentUploadedAt: c.consentUploadedAt ? c.consentUploadedAt.toISOString() : undefined,
+      }));
+
+      // Map feedback
+      this.data.feedback = pFeedback.map((fb) => ({
+        id: fb.id,
+        experienceId: fb.experienceId,
+        studentId: fb.studentId,
+        rating: fb.rating,
+        overallRating: fb.overallRating || undefined,
+        technicalExposureRating: fb.technicalExposureRating || undefined,
+        facultyCoordinationRating: fb.facultyCoordinationRating || undefined,
+        organizationRating: fb.organizationRating || undefined,
+        learningValueRating: fb.learningValueRating || undefined,
+        recommend: fb.recommend ? (fb.recommend === 'YES' || fb.recommend === 'NO' ? fb.recommend : fb.recommend === 'true') : undefined,
+        positiveComment: fb.positiveComment || undefined,
+        improvementComment: fb.improvementComment || undefined,
+        comments: fb.comments || undefined,
+        submittedAt: fb.submittedAt.toISOString(),
+        createdAt: fb.createdAt ? fb.createdAt.toISOString() : undefined,
+      }));
+
+      // Map security recipients
+      this.data.securityRecipients = pSecurityRecipients.map((sr) => ({
+        id: sr.id,
+        name: sr.name,
+        email: sr.email,
+        department: sr.department,
+        gateLocation: sr.gateLocation,
+        phone: sr.phone || undefined,
+        notes: sr.notes || undefined,
+        isActive: sr.isActive,
+        createdAt: sr.createdAt.toISOString(),
+        updatedAt: sr.updatedAt ? sr.updatedAt.toISOString() : undefined,
+      }));
+
+      // Map trip reminders
+      this.data.tripReminders = pTripReminders.map((tr) => ({
+        id: tr.id,
+        tripId: tr.tripId,
+        tripTitle: tr.tripTitle,
+        tripDate: tr.tripDate,
+        reminderType: tr.reminderType as any,
+        targetDate: tr.targetDate,
+        studentsNotified: tr.studentsNotified,
+        facultyNotified: tr.facultyNotified,
+        securityNotified: tr.securityNotified,
+        adminNotified: tr.adminNotified,
+        recipientCount: tr.recipientCount || undefined,
+        totalEmailsSent: tr.totalEmailsSent,
+        totalEmailsFailed: tr.totalEmailsFailed,
+        triggerSource: tr.triggerSource || undefined,
+        dispatchedAt: tr.dispatchedAt.toISOString(),
+        status: tr.status as any,
+        details: tr.details || undefined,
+      }));
+
+      // Map reports
+      this.data.reports = pReports.map((r) => ({
+        id: r.id,
+        experienceId: r.experienceId,
+        studentId: r.studentId,
+        studentName: r.studentName || undefined,
+        studentEnrollment: r.studentEnrollment || undefined,
+        studentDepartment: r.studentDepartment || undefined,
+        studentBranch: r.studentBranch || undefined,
+        studentYear: r.studentYear || undefined,
+        studentSemester: r.studentSemester || undefined,
+        studentDivision: r.studentDivision || undefined,
+        tripTitle: r.tripTitle || undefined,
+        organizationName: r.organizationName || undefined,
+        visitDate: r.visitDate || undefined,
+        whatILearned: r.whatILearned,
+        activities: r.activities,
+        skillsGained: r.skillsGained,
+        experience: r.experience,
+        suggestions: r.suggestions || undefined,
+        submittedAt: r.submittedAt.toISOString(),
+        updatedAt: r.updatedAt.toISOString(),
+        status: r.status as any,
+      }));
+
+      // Map report photos
+      this.data.reportPhotos = pReportPhotos.map((rp) => ({
+        id: rp.id,
+        reportId: rp.reportId,
+        experienceId: rp.experienceId,
+        studentId: rp.studentId,
+        fileName: rp.fileName,
+        fileSize: rp.fileSize || undefined,
+        fileType: rp.fileType,
+        fileUrl: rp.fileUrl,
+        uploadedAt: rp.uploadedAt.toISOString(),
+        caption: rp.caption || undefined,
+      }));
+
+      console.log(`[DatabaseService] Authoritative Prisma store loaded successfully (${this.data.users.length} users, ${this.data.experiences.length} visits, ${this.data.registrations.length} registrations).`);
+    } catch (err: any) {
+      console.error('[DatabaseService] Error loading from Prisma:', err.message);
     }
   }
 
   public saveDatabase() {
-    this.saveDatabaseData(this.data);
+    // Runtime writes are persisted authoritatively to Prisma.
+    // Legacy file writes to vit_platform_db.json are decommissioned.
   }
 
   // --- USERS & PROFILES ---
@@ -1585,15 +2056,28 @@ class DatabaseService {
 
     // Ensure password hash exists
     if (!user.passwordHash || !user.salt) {
-      const { hash, salt } = hashPassword('Password@123');
-      user.passwordHash = hash;
-      user.salt = salt;
-      this.saveDatabase();
+      this.addSecurityEvent({
+        eventType: 'LOGIN_FAILED',
+        actorEmail: user.email,
+        actorId: user.id,
+        actorName: user.name,
+        actorRole: user.role,
+        resource: '/api/auth/login',
+        actionAttempted: 'LOGIN',
+        severity: 'HIGH',
+        status: 'BLOCKED',
+        reason: 'Account has no configured password hash.',
+        description: 'Login rejected because user password credentials are not initialized.',
+      });
+      return {
+        success: false,
+        error: 'Password not set for this account. Please request a password reset or contact an administrator.',
+        statusCode: 401,
+      };
     }
 
-    // Verify password
-    const isDefaultPassword = passwordInput === 'Password@123';
-    const isValid = verifyPassword(passwordInput, user.passwordHash, user.salt) || isDefaultPassword;
+    // Verify password strictly against stored PBKDF2 hash
+    const isValid = verifyPassword(passwordInput, user.passwordHash, user.salt);
 
     if (!isValid) {
       this.addSecurityEvent({
@@ -1649,18 +2133,27 @@ class DatabaseService {
 
   public verifyUserPassword(userId: string, passwordInput: string): boolean {
     const user = this.getUserById(userId);
-    if (!user) return false;
-    return verifyPassword(passwordInput, user.passwordHash, user.salt) || passwordInput === 'Password@123';
+    if (!user || !user.passwordHash || !user.salt) return false;
+    return verifyPassword(passwordInput, user.passwordHash, user.salt);
   }
 
   public updateUserPassword(userId: string, newPasswordInput: string): boolean {
     const user = this.getUserById(userId);
-    if (!user) return false;
-
     const { hash, salt } = hashPassword(newPasswordInput);
-    user.passwordHash = hash;
-    user.salt = salt;
-    user.updatedAt = new Date().toISOString();
+    if (user) {
+      user.passwordHash = hash;
+      user.salt = salt;
+      user.updatedAt = new Date().toISOString();
+    }
+
+    // Persist authoritatively to Prisma
+    prisma.user.update({
+      where: { id: userId },
+      data: { passwordHash: hash, salt, updatedAt: new Date() },
+    }).catch((err) => {
+      console.error('[DB] Failed to persist password to Prisma:', err.message);
+    });
+
     this.saveDatabase();
     return true;
   }
@@ -1675,6 +2168,10 @@ class DatabaseService {
 
   public getFacultyProfileByUserId(userId: string): FacultyProfile | undefined {
     return this.data.faculty.find((f) => f.userId === userId);
+  }
+
+  public getFacultyProfileByFacultyId(facultyId: string): FacultyProfile | undefined {
+    return this.data.faculty.find((f) => f.facultyId?.toUpperCase() === facultyId.toUpperCase());
   }
 
   public getAllStudents(): StudentProfile[] {
@@ -4245,6 +4742,31 @@ class DatabaseService {
     if (this.data.auditLogs.length > 1000) {
       this.data.auditLogs = this.data.auditLogs.slice(0, 1000);
     }
+    prisma.auditLog.create({
+      data: {
+        id: log.id,
+        timestamp: new Date(log.timestamp),
+        action: log.action,
+        module: log.module || 'SYSTEM',
+        actorId: log.actorId || log.performedBy || null,
+        actorName: log.actorName || log.performedByName || null,
+        actorEmail: log.actorEmail || null,
+        actorRole: log.actorRole || log.userRole || null,
+        performedBy: log.performedBy || null,
+        performedByName: log.performedByName || null,
+        userRole: log.userRole || null,
+        targetId: log.targetId || null,
+        targetName: log.targetName || null,
+        entityId: log.entityId || null,
+        entityType: log.entityType || null,
+        description: log.description || null,
+        details: typeof log.details === 'object' ? JSON.stringify(log.details) : (log.details || null),
+        status: log.status || 'SUCCESS',
+        metadata: log.metadata ? JSON.stringify(log.metadata) : null,
+        ipAddress: log.ipAddress || null,
+        userAgent: log.userAgent || null,
+      },
+    }).catch(() => {});
     this.saveDatabase();
     return log;
   }
@@ -4370,6 +4892,26 @@ class DatabaseService {
     if (this.data.securityEvents.length > 1000) {
       this.data.securityEvents = this.data.securityEvents.slice(0, 1000);
     }
+    prisma.securityEvent.create({
+      data: {
+        id: newEvent.id,
+        timestamp: new Date(newEvent.timestamp),
+        eventType: newEvent.eventType,
+        actorEmail: newEvent.actorEmail,
+        actorId: newEvent.actorId || null,
+        actorName: newEvent.actorName || null,
+        actorRole: newEvent.actorRole || 'UNKNOWN',
+        resource: newEvent.resource,
+        actionAttempted: newEvent.actionAttempted,
+        severity: newEvent.severity || 'LOW',
+        status: newEvent.status || 'ALLOWED',
+        reason: newEvent.reason || null,
+        description: newEvent.description || '',
+        ipAddress: newEvent.ipAddress || null,
+        userAgent: newEvent.userAgent || null,
+        metadata: newEvent.metadata ? JSON.stringify(newEvent.metadata) : null,
+      },
+    }).catch(() => {});
     this.saveDatabase();
     return newEvent;
   }

@@ -15,6 +15,7 @@ export interface User {
   consentDocumentUrl?: string;
   consentRejectionReason?: string;
   consentUploadedAt?: string;
+  tokenVersion?: number;
 }
 
 export interface StudentProfile {

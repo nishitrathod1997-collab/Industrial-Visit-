@@ -7,13 +7,23 @@ import { prisma } from './server/db';
 import { initReminderScheduler } from './server/scheduler';
 import { initEmailWorker } from './server/emailWorker';
 import { ensureDemoAccounts } from './server/seedDemo';
+import { getValidatedJwtSecret, initializeRevocationStore } from './server/auth';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
 async function startServer() {
+  // Validate production cryptographic configuration
+  getValidatedJwtSecret();
+
+  // Initialize persistent token revocation store
+  await initializeRevocationStore();
+
+  // Initialize authoritative domain database from persistent Prisma store
+  await db.initializeFromPrisma();
+
   const app = express();
-  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+  const PORT = 3000;
 
   // Initialize background email queue dispatcher and 3-Day reminder scheduler
   initEmailWorker(db);
@@ -25,6 +35,11 @@ async function startServer() {
   // Body parsers with generous limits for uploads, documents, signatures and images
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+  // Health check endpoint
+  app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok', time: new Date().toISOString() });
+  });
 
   // API routes mounted FIRST
   app.use('/api', apiRouter);
@@ -45,11 +60,6 @@ async function startServer() {
       return res.status(400).json({ error: 'Malformed JSON payload provided.' });
     }
     next(err);
-  });
-
-  // Health check endpoint
-  app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', time: new Date().toISOString() });
   });
 
   // Vite middleware for development
