@@ -4,11 +4,20 @@ build/
 coverage/
 .DS_Store
 *.log
+bun.lock
 .env
 .env.local
 !.env.example
+# Database and sensitive data directories
+data/
+*.sqlite
+*.sqlite3
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
+dev.db*
+backups/
 
 # AI IDE tool configs (not part of project)
 .agent/

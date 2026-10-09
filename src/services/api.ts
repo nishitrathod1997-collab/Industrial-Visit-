@@ -62,7 +62,6 @@ async function fetchApi<T>(endpoint: string, options: RequestInit = {}): Promise
 
   if (currentAuthToken) {
     headers['Authorization'] = `Bearer ${currentAuthToken}`;
-    headers['x-user-id'] = currentAuthToken;
   }
 
   const response = await fetch(`/api${endpoint}`, {

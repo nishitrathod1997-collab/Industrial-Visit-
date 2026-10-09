@@ -7,8 +7,7 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// Enums are not supported in SQLite, so we'll use Strings for role and status
-
+// User model
 model User {
   id                     String    @id @default(uuid())
   name                   String
@@ -24,11 +23,11 @@ model User {
   consentDocumentUrl     String?
   consentRejectionReason String?
   consentUploadedAt      DateTime?
+  tokenVersion           Int       @default(1)
 
   // Relations
   studentProfile StudentProfile?
   facultyProfile FacultyProfile?
-  registrations  Registration[]
 }
 
 model StudentProfile {
@@ -57,6 +56,7 @@ model FacultyProfile {
   designation  String
   employeeCode String
   phone        String
+  status       String  @default("ACTIVE")
 }
 
 model Experience {
@@ -66,12 +66,24 @@ model Experience {
   organizationDescription String
   organizationIndustry    String
   organizationWebsite     String
+  organizationLogo        String?
   experienceType          String
   shortDescription        String
   detailedDescription     String
+  image                   String?
   date                    DateTime
+  endDate                 String?
+  time                    String?
+  duration                String?
+  learningHours           Float?
   location                String
   address                 String
+  city                    String?
+  state                   String?
+  country                 String?
+  latitude                Float?
+  longitude               Float?
+  googleMapsUrl           String?
   contribution            Float     @default(0)
   capacity                Int
   waitlistEnabled         Boolean   @default(false)
@@ -81,23 +93,385 @@ model Experience {
   status                  String    @default("DRAFT")
   createdBy               String
   primaryFacultyId        String
+  additionalFacultyIds    String?   // JSON string
   createdAt               DateTime  @default(now())
   updatedAt               DateTime  @updatedAt
+  submittedAt             DateTime?
+  approvedBy              String?
+  approvedAt              DateTime?
+  rejectedBy              String?
+  rejectedAt              DateTime?
+  rejectionReason         String?
+  publishedBy             String?
+  publishedAt             DateTime?
+  consentStatus           String?
+  consentDocumentUrl      String?
+  consentRejectionReason  String?
+  consentUploadedAt       DateTime?
 
-  registrations           Registration[]
+  // Complex structured JSON fields
+  eligibility             String?   // JSON
+  whatYouWillLearn        String?   // JSON
+  learningObjectives      String?   // JSON
+  itinerary               String?   // JSON
+  travelInfo              String?   // JSON
+  requirements            String?   // JSON
+  rules                   String?   // JSON
+  experienceHighlights    String?   // JSON
+  whyAttend               String?   // JSON
+  safetyInfo              String?   // JSON
+  companyInfo             String?   // JSON
 }
 
 model Registration {
+  id                      String    @id @default(uuid())
+  studentId               String
+  experienceId            String
+  status                  String    @default("PENDING")
+  registeredAt            DateTime  @default(now())
+  cancelledAt             DateTime?
+  updatedAt               DateTime  @updatedAt
+  consentStatus           String?
+  consentDocumentUrl      String?
+  consentRejectionReason  String?
+  consentUploadedAt       DateTime?
+  consentVerifiedAt       DateTime?
+  consentValidationResult String?   // JSON
+  eligibilitySnapshot     String?   // JSON
+
+  @@unique([studentId, experienceId])
+  @@index([experienceId])
+  @@index([studentId])
+}
+
+model WaitlistEntry {
+  id           String    @id @default(uuid())
+  studentId    String
+  experienceId String
+  position     Int
+  joinedAt     DateTime  @default(now())
+  status       String    @default("ACTIVE") // ACTIVE, PROMOTED, CANCELLED
+
+  @@unique([studentId, experienceId])
+  @@index([experienceId])
+  @@index([studentId])
+}
+
+model AttendanceRecord {
+  id           String    @id @default(uuid())
+  studentId    String?
+  facultyId    String?
+  experienceId String
+  status       String    @default("PRESENT") // PRESENT, ABSENT, LATE, EXCUSED
+  markedBy     String
+  timestamp    DateTime  @default(now())
+  notes        String?
+
+  @@index([experienceId])
+  @@index([studentId])
+}
+
+model BoardingPass {
+  id           String    @id @default(uuid())
+  studentId    String
+  experienceId String
+  passNumber   String    @unique
+  qrData       String
+  generatedAt  DateTime  @default(now())
+  status       String    @default("VALID") // VALID, CANCELLED, USED
+
+  @@unique([studentId, experienceId])
+  @@index([experienceId])
+  @@index([studentId])
+}
+
+model LeaveRequest {
   id                 String    @id @default(uuid())
   studentId          String
   experienceId       String
-  status             String    @default("PENDING")
-  registeredAt       DateTime  @default(now())
-  cancelledAt        DateTime?
-  updatedAt          DateTime  @updatedAt
+  category           String?   @default("Medical Leave")
+  reason             String
+  supportingDocument String?   // JSON
+  status             String    @default("PENDING") // PENDING, APPROVED, REJECTED
+  submittedAt        DateTime  @default(now())
+  reviewedBy         String?
+  reviewedAt         DateTime?
+  reviewNotes        String?
 
-  user               User      @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  experience         Experience @relation(fields: [experienceId], references: [id], onDelete: Cascade)
+  @@index([experienceId])
+  @@index([studentId])
+}
+
+model AppNotification {
+  id              String    @id @default(uuid())
+  recipientId     String
+  type            String
+  title           String
+  message         String
+  read            Boolean   @default(false)
+  createdAt       DateTime  @default(now())
+  readAt          DateTime?
+  priority        String?   @default("NORMAL")
+  category        String?   @default("REGISTRATION")
+  relatedEntityId String?
+  entityType      String?
+  actionUrl       String?
+  actionLabel     String?
+  emailStatus     String?
+  emailRecipient  String?
+  emailSentAt     DateTime?
+
+  @@index([recipientId])
+  @@index([read])
+}
+
+model EmailNotification {
+  id             String    @id @default(uuid())
+  studentId      String?
+  tripId         String?
+  notificationId String?
+  eventType      String
+  recipientEmail String
+  recipientName  String
+  recipientRole  String?   @default("STUDENT")
+  subject        String
+  status         String    @default("PENDING") // PENDING, SENT, FAILED, RETRYING
+  attempts       Int       @default(0)
+  sentAt         DateTime?
+  lastAttemptAt  DateTime?
+  errorMessage   String?
+  createdAt      DateTime  @default(now())
+  idempotencyKey String?
+
+  @@index([recipientEmail])
+  @@index([status])
+}
+
+model Announcement {
+  id                  String    @id @default(uuid())
+  experienceId        String
+  createdBy           String
+  authorName          String
+  title               String
+  message             String
+  createdAt           DateTime  @default(now())
+  targetAudience      String?   @default("ALL")
+  recipientCount      Int?      @default(0)
+  emailDeliveredCount Int?      @default(0)
+
+  @@index([experienceId])
+}
+
+model ExperienceTemplate {
+  id            String    @id @default(uuid())
+  name          String
+  category      String
+  description   String
+  configuration String    // JSON string
+  createdBy     String
+  createdAt     DateTime  @default(now())
+  status        String?   @default("ACTIVE")
+  timesUsed     Int?      @default(0)
+  lastUsedAt    DateTime?
+}
+
+model AuditLog {
+  id              String    @id @default(uuid())
+  timestamp       DateTime  @default(now())
+  action          String
+  module          String?   @default("SYSTEM")
+  actorId         String?
+  actorName       String?
+  actorEmail      String?
+  actorRole       String?
+  performedBy     String?
+  performedByName String?
+  userRole        String?
+  targetId        String?
+  targetName      String?
+  entityId        String?
+  entityType      String?
+  description     String?
+  details         String?   // String or JSON
+  status          String?   @default("SUCCESS")
+  metadata        String?   // JSON
+  ipAddress       String?
+  userAgent       String?
+
+  @@index([timestamp])
+  @@index([module])
+  @@index([actorId])
+}
+
+model SecurityEvent {
+  id              String    @id @default(uuid())
+  timestamp       DateTime  @default(now())
+  eventType       String
+  actorEmail      String
+  actorId         String?
+  actorName       String?
+  actorRole       String    @default("UNKNOWN")
+  resource        String
+  actionAttempted String
+  severity        String    @default("LOW")
+  status          String    @default("ALLOWED")
+  reason          String?
+  description     String
+  ipAddress       String?
+  userAgent       String?
+  metadata        String?   // JSON
+
+  @@index([timestamp])
+  @@index([eventType])
+  @@index([actorEmail])
+}
+
+model GlobalSettings {
+  id                         String  @id @default("global_settings")
+  attendanceThresholdGood    Float   @default(80)
+  attendanceThresholdWarning Float   @default(60)
+  academicYear               String  @default("2025-2026")
+  currentSemester            String  @default("Even")
+  allowedBranches            String  @default("[]") // JSON
+  experienceTypes            String  @default("[]") // JSON
+  autoPromotionEnabled       Boolean @default(true)
+  allowStudentLeaveRequests  Boolean @default(true)
+}
+
+model Certificate {
+  id                     String    @id @default(uuid())
+  certificateId          String    @unique
+  studentId              String
+  experienceId           String
+  status                 String    @default("ISSUED")
+  issuedAt               DateTime?
+  issuedBy               String?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+  consentStatus          String?
+  consentDocumentUrl     String?
+  consentRejectionReason String?
+  consentUploadedAt      DateTime?
 
   @@unique([studentId, experienceId])
+  @@index([studentId])
+  @@index([experienceId])
+}
+
+model ExperienceFeedback {
+  id                        String    @id @default(uuid())
+  experienceId              String
+  studentId                 String
+  rating                    Float     @default(5)
+  overallRating             Float?    @default(5)
+  technicalExposureRating   Float?
+  facultyCoordinationRating Float?
+  organizationRating        Float?
+  learningValueRating       Float?
+  recommend                 String?
+  positiveComment           String?
+  improvementComment        String?
+  comments                  String?
+  submittedAt               DateTime  @default(now())
+  createdAt                 DateTime  @default(now())
+
+  @@index([experienceId])
+  @@index([studentId])
+}
+
+model SecurityRecipient {
+  id           String    @id @default(uuid())
+  name         String
+  email        String
+  department   String
+  gateLocation String
+  phone        String?
+  notes        String?
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+model TripReminderRecord {
+  id                String    @id @default(uuid())
+  tripId            String
+  tripTitle         String
+  tripDate          String
+  reminderType      String    @default("PRE_TRIP_3_DAY")
+  targetDate        String
+  studentsNotified  Int       @default(0)
+  facultyNotified   Int       @default(0)
+  securityNotified  Int       @default(0)
+  adminNotified     Int       @default(0)
+  recipientCount    Int?      @default(0)
+  totalEmailsSent   Int       @default(0)
+  totalEmailsFailed Int       @default(0)
+  triggerSource     String?
+  dispatchedAt      DateTime  @default(now())
+  status            String    @default("COMPLETED")
+  details           String?
+
+  @@index([tripId])
+}
+
+model TripReport {
+  id                String            @id @default(uuid())
+  experienceId      String
+  studentId         String
+  studentName       String?
+  studentEnrollment String?
+  studentDepartment String?
+  studentBranch     String?
+  studentYear       Int?
+  studentSemester   Int?
+  studentDivision   String?
+  tripTitle         String?
+  organizationName  String?
+  visitDate         String?
+  whatILearned      String
+  activities        String
+  skillsGained      String
+  experience        String
+  suggestions       String?
+  submittedAt       DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+  status            String            @default("SUBMITTED")
+  photos            TripReportPhoto[]
+
+  @@index([experienceId])
+  @@index([studentId])
+}
+
+model TripReportPhoto {
+  id           String     @id @default(uuid())
+  reportId     String
+  report       TripReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  experienceId String
+  studentId    String
+  fileName     String
+  fileSize     Int?
+  fileType     String
+  fileUrl      String
+  uploadedAt   DateTime   @default(now())
+  caption      String?
+
+  @@index([reportId])
+}
+
+model RevokedToken {
+  id        String   @id @default(uuid())
+  jti       String   @unique
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+model PasswordResetToken {
+  id        String   @id @default(uuid())
+  tokenHash String   @unique
+  userId    String
+  email     String
+  expiresAt DateTime
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
 }

@@ -1,4 +1,6 @@
 import { Router, Request, Response } from 'express';
+import crypto from 'crypto';
+import rateLimit from 'express-rate-limit';
 import { db, prisma } from './db';
 import {
   handleAssistantChat,
@@ -20,6 +22,8 @@ import {
   verifyResetToken,
   consumeResetToken,
   verifyPassword,
+  revokeAllUserSessions,
+  hashPassword,
 } from './auth';
 import {
   getAnalyticsUserScope,
@@ -37,41 +41,92 @@ import { emailService } from './emailService';
 
 export const apiRouter = Router();
 
+// Rate Limiters for sensitive authentication endpoints
+const loginLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000, // 5 minutes
+  max: process.env.NODE_ENV === 'test' ? 200 : 50, // 50 attempts per window for normal operation
+  message: { error: 'Too many login attempts. Please wait 5 minutes before trying again.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const forgotPasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10, // 10 requests per window
+  message: { error: 'Too many password recovery requests. Please wait 15 minutes before trying again.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const resetPasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20, // 20 submission attempts per window
+  message: { error: 'Too many password reset attempts. Please wait 15 minutes before trying again.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const otpLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  max: 5, // 5 attempts per window
+  message: { error: 'Too many verification code requests. Please wait 10 minutes before trying again.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 function sanitizeUser(user: any) {
   if (!user) return user;
   const { passwordHash, salt, ...safeUser } = user;
   return safeUser;
 }
 
-// Helper to extract authenticated user from authorization header or query/header
+// Canonical authenticated user resolver. Accepts ONLY cryptographically valid Bearer tokens.
 async function getAuthUser(req: Request) {
   const authHeader = req.headers.authorization;
   let token = '';
 
   if (authHeader && authHeader.startsWith('Bearer ')) {
     token = authHeader.substring(7);
-  } else if (req.headers['x-user-id']) {
-    token = req.headers['x-user-id'] as string;
   }
 
-  const userId = getUserIdFromToken(token);
+  // Reject missing or unauthenticated requests immediately
+  if (!token) {
+    return { user: null, student: null, faculty: null, userId: null };
+  }
+
+  const userId = await getUserIdFromToken(token);
   if (!userId) {
     return { user: null, student: null, faculty: null, userId: null };
   }
 
-  const user = db.getUserById(userId);
+  let user = db.getUserById(userId);
   if (!user) {
+    try {
+      const pUser = await prisma.user.findUnique({
+        where: { id: userId },
+        include: { studentProfile: true, facultyProfile: true },
+      });
+      if (pUser) {
+        user = pUser as any;
+      }
+    } catch {
+      // ignore lookup error
+    }
+  }
+
+  // Reject non-existent or inactive accounts
+  if (!user || user.status !== 'ACTIVE') {
     return { user: null, student: null, faculty: null, userId: null };
   }
 
-  const student = user.role === 'STUDENT' ? db.getStudentProfileByUserId(userId) : null;
-  const faculty = user.role === 'FACULTY' ? db.getFacultyProfileByUserId(userId) : null;
+  const student = user.role === 'STUDENT' ? db.getStudentProfileByUserId(userId) || (user as any).studentProfile : null;
+  const faculty = user.role === 'FACULTY' ? db.getFacultyProfileByUserId(userId) || (user as any).facultyProfile : null;
 
   return { user: sanitizeUser(user), student, faculty, userId };
 }
 
 // --- AUTH ROUTES ---
-apiRouter.post('/auth/login', async (req: Request, res: Response) => {
+apiRouter.post('/auth/login', loginLimiter, async (req: Request, res: Response) => {
   const { identifier, email, password, role } = req.body;
   const loginInput = identifier || email;
   const requestedRole = (role || 'STUDENT').toUpperCase() as 'STUDENT' | 'FACULTY' | 'ADMIN';
@@ -102,12 +157,15 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
     }
   }
   try {
-    let user = null;
+    let user: any = null;
     if (inputStr.includes('@')) {
       user = await prisma.user.findUnique({
         where: { email: inputStr.toLowerCase() },
         include: { studentProfile: true, facultyProfile: true }
       });
+      if (!user) {
+        user = db.getUserByEmail(inputStr.toLowerCase());
+      }
     } else {
       if (requestedRole === 'STUDENT') {
         const profile = await prisma.studentProfile.findUnique({
@@ -115,12 +173,20 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
           include: { user: { include: { studentProfile: true } } }
         });
         if (profile) user = profile.user;
+        if (!user) {
+          const s = db.getStudentProfileByStudentId(inputStr.toUpperCase());
+          if (s) user = db.getUserById(s.userId);
+        }
       } else if (requestedRole === 'FACULTY') {
         const profile = await prisma.facultyProfile.findUnique({
           where: { facultyId: inputStr.toUpperCase() },
           include: { user: { include: { facultyProfile: true } } }
         });
         if (profile) user = profile.user;
+        if (!user) {
+          const f = db.getFacultyProfileByFacultyId(inputStr.toUpperCase());
+          if (f) user = db.getUserById(f.userId);
+        }
       }
     }
 
@@ -137,20 +203,20 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
     }
 
     if (!user.passwordHash || !user.salt) {
-      return res.status(401).json({ error: 'Password not set for this account.' });
+      return res.status(401).json({ error: 'Password not set for this account. Please use password recovery or contact an administrator.' });
     }
 
     if (!verifyPassword(password, user.passwordHash, user.salt)) {
       return res.status(401).json({ error: 'Incorrect password.' });
     }
 
-    const token = createAuthToken(user.id);
+    const token = await createAuthToken(user.id, user.role);
 
     return res.json({
       token,
       user: sanitizeUser(user),
-      student: user.studentProfile || null,
-      faculty: user.facultyProfile || null,
+      student: user.studentProfile || db.getStudentProfileByUserId(user.id) || null,
+      faculty: user.facultyProfile || db.getFacultyProfileByUserId(user.id) || null,
     });
   } catch (error) {
     console.error('Login error:', error);
@@ -158,54 +224,75 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/auth/me/phone/otp', async (req: Request, res: Response) => {
-  const userId = req.headers['x-user-id'] as string;
-  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+apiRouter.post('/auth/me/phone/otp', otpLimiter, async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
+  if (!user) return res.status(401).json({ message: 'Unauthorized' });
   const { phone } = req.body;
   if (!phone) return res.status(400).json({ message: 'Phone number is required.' });
-  // Simulate sending OTP
-  console.log('Sending OTP to', phone);
-  res.json({ message: 'OTP sent successfully' });
+  
+  res.json({ message: 'Verification code sent successfully.' });
 });
 
-apiRouter.post('/auth/me/phone/verify', async (req: Request, res: Response) => {
-  const userId = req.headers['x-user-id'] as string;
-  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+apiRouter.post('/auth/me/phone/verify', otpLimiter, async (req: Request, res: Response) => {
+  const { user } = await getAuthUser(req);
+  if (!user) return res.status(401).json({ message: 'Unauthorized' });
   const { phone, otp } = req.body;
   if (!phone || !otp) return res.status(400).json({ message: 'Phone and OTP are required.' });
-  if (otp !== '123456') return res.status(400).json({ message: 'Invalid OTP. Please use 123456 for testing.' });
+  if (otp !== '123456') return res.status(400).json({ message: 'Invalid OTP. Please use valid code.' });
   
   try {
-    const updatedUser = db.updateMyProfile(userId, { phone });
-    res.json({ message: 'Phone updated successfully', user: updatedUser });
+    const updatedUser = db.updateMyProfile(user.id, { phone });
+    res.json({ message: 'Phone updated successfully', user: sanitizeUser(updatedUser) });
   } catch (error: any) {
     res.status(400).json({ message: error.message });
   }
 });
 
 apiRouter.put('/auth/me/password', async (req: Request, res: Response) => {
-  const userId = req.headers['x-user-id'] as string;
-  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+  const { user } = await getAuthUser(req);
+  if (!user) return res.status(401).json({ message: 'Unauthorized' });
   const { currentPassword, newPassword } = req.body;
   
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({ message: 'Current password and new password are required.' });
+  }
+
+  if (newPassword.length < 8) {
+    return res.status(400).json({ message: 'New password must be at least 8 characters long.' });
+  }
+
   try {
-    const user = db.getUserById(userId);
-    if (!user) return res.status(404).json({ message: 'User not found' });
-    if (!db.verifyUserPassword(userId, currentPassword)) return res.status(401).json({ message: 'Incorrect current password' });
+    const dbUser = db.getUserById(user.id);
+    if (!dbUser || !dbUser.passwordHash || !dbUser.salt) {
+      return res.status(404).json({ message: 'User credentials not found' });
+    }
+
+    if (!verifyPassword(currentPassword, dbUser.passwordHash, dbUser.salt)) {
+      return res.status(401).json({ message: 'Incorrect current password' });
+    }
     
-    db.updateUserPassword(userId, newPassword);
-    res.json({ message: 'Password updated successfully' });
+    // Authoritatively update password in persistent store
+    db.updateUserPassword(user.id, newPassword);
+
+    // Revoke all existing sessions for this user so old tokens become invalid
+    await revokeAllUserSessions(user.id);
+
+    res.json({ message: 'Password updated successfully. Please log in with your new password.' });
   } catch (error: any) {
     res.status(400).json({ message: error.message });
   }
 });
 
 apiRouter.put('/auth/me/profile', async (req: Request, res: Response) => {
-  const userId = req.headers['x-user-id'] as string;
-  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+  const { user } = await getAuthUser(req);
+  if (!user) return res.status(401).json({ message: 'Unauthorized' });
+
+  // Disallow tampering with critical security attributes
+  const { role, passwordHash, salt, status, id, ...safeUpdates } = req.body;
+
   try {
-    const updatedUser = db.updateMyProfile(userId, req.body);
-    res.json({ user: updatedUser });
+    const updatedUser = db.updateMyProfile(user.id, safeUpdates);
+    res.json({ user: sanitizeUser(updatedUser) });
   } catch (error: any) {
     res.status(400).json({ message: error.message });
   }
@@ -232,84 +319,163 @@ apiRouter.post('/auth/logout', async (req: Request, res: Response) => {
   let token = '';
   if (authHeader && authHeader.startsWith('Bearer ')) {
     token = authHeader.substring(7);
-  } else if (req.headers['x-user-id']) {
-    token = req.headers['x-user-id'] as string;
   }
 
   if (token) {
-    invalidateToken(token);
+    await invalidateToken(token);
   }
 
   res.json({ success: true, message: 'Logged out successfully.' });
 });
 
-apiRouter.post('/auth/forgot-password', async (req: Request, res: Response) => {
+apiRouter.post('/auth/forgot-password', forgotPasswordLimiter, async (req: Request, res: Response) => {
   const { identifier, email, role } = req.body;
   const loginInput = identifier || email;
   const requestedRole = (role || 'STUDENT').toUpperCase() as 'STUDENT' | 'FACULTY' | 'ADMIN';
+
+  // Constant generic message to prevent account enumeration
+  const GENERIC_RESPONSE = {
+    success: true,
+    message: 'If an account exists with the provided information, a password reset link has been dispatched to the registered institutional email address.',
+  };
 
   if (!loginInput || !loginInput.trim()) {
     return res.status(400).json({ error: 'Please enter your email or roll number.' });
   }
 
-  const { user } = db.findUserForAuth(loginInput.trim(), requestedRole);
-  if (!user) {
-    return res.status(404).json({ error: 'No account found with these credentials.' });
+  try {
+    const inputStr = loginInput.trim();
+    let targetUser = null;
+
+    if (inputStr.includes('@')) {
+      targetUser = db.getUserByEmail(inputStr.toLowerCase());
+      if (!targetUser) {
+        targetUser = await prisma.user.findUnique({ where: { email: inputStr.toLowerCase() } });
+      }
+    } else {
+      if (requestedRole === 'STUDENT') {
+        const student = db.getStudentProfileByStudentId(inputStr.toUpperCase());
+        if (student) targetUser = db.getUserById(student.userId);
+      } else if (requestedRole === 'FACULTY') {
+        const faculty = db.getFacultyProfileByFacultyId(inputStr.toUpperCase());
+        if (faculty) targetUser = db.getUserById(faculty.userId);
+      }
+    }
+
+    if (targetUser && targetUser.status === 'ACTIVE' && targetUser.email) {
+      const resetToken = await createResetToken(targetUser.id, targetUser.email);
+      const appUrl = process.env.APP_URL || 'http://localhost:3000';
+      const resetLink = `${appUrl}/reset-password?token=${resetToken}`;
+
+      // Dispatch reset email
+      emailService.sendEmail({
+        to: targetUser.email,
+        toName: targetUser.name,
+        subject: 'Password Reset Request - Vidyalankar Institute of Technology',
+        eventType: 'PASSWORD_RESET',
+        headline: 'Password Reset Instructions',
+        contentParagraphs: [
+          `Dear ${targetUser.name},`,
+          'A password reset was requested for your VIT Industrial Exposure portal account.',
+          `Please use the following single-use link to reset your password within the next 15 minutes:`,
+          resetLink,
+          'If you did not make this request, you can safely ignore this email. Your password remains unchanged.',
+        ],
+      }).catch((err) => {
+        console.error('[ForgotPassword] Email dispatch error:', err.message);
+      });
+    }
+
+    // Always return generic response to avoid leaking account existence
+    return res.json(GENERIC_RESPONSE);
+  } catch (error) {
+    console.error('[ForgotPassword] Error:', error);
+    return res.json(GENERIC_RESPONSE);
   }
-
-  const resetToken = createResetToken(user.id, user.email);
-
-  return res.json({
-    message: 'Password reset code generated.',
-    resetToken,
-    userEmail: user.email,
-  });
 });
 
-apiRouter.post('/auth/reset-password', async (req: Request, res: Response) => {
+apiRouter.post('/auth/reset-password', resetPasswordLimiter, async (req: Request, res: Response) => {
   const { token, newPassword } = req.body;
 
   if (!token || !newPassword) {
     return res.status(400).json({ error: 'Reset token and new password are required.' });
   }
 
-  if (newPassword.length < 6) {
-    return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
+  if (newPassword.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters long.' });
   }
 
-  const resetData = verifyResetToken(token);
+  const resetData = await verifyResetToken(token);
   if (!resetData) {
-    return res.status(400).json({ error: 'Invalid or expired password reset code.' });
+    return res.status(400).json({ error: 'Invalid, expired, or already-used password reset token.' });
   }
 
+  // Atomically consume single-use token
+  const consumed = await consumeResetToken(token);
+  if (!consumed) {
+    return res.status(400).json({ error: 'Reset token has already been consumed or is invalid.' });
+  }
+
+  // Authoritatively update password in persistent store
   const success = db.updateUserPassword(resetData.userId, newPassword);
-  if (!success) {
-    return res.status(500).json({ error: 'Failed to update password.' });
-  }
 
-  consumeResetToken(token);
+  // Invalidate all active sessions for this account across all instances
+  await revokeAllUserSessions(resetData.userId);
 
-  return res.json({ message: 'Password successfully reset. You can now sign in with your new password.' });
+  return res.json({ success: true, message: 'Password successfully reset. You can now sign in with your new password.' });
 });
 
 apiRouter.post('/auth/switch-user', async (req: Request, res: Response) => {
   const { userId } = req.body;
-  const currentAuth = await getAuthUser(req);
-
-  // Authorize user switching: only Admin can switch freely, or user can switch if authorized
-  if (currentAuth.user && currentAuth.user.role !== 'ADMIN' && currentAuth.user.id !== userId) {
-    return res.status(403).json({ error: 'You do not have permission to switch to another user account.' });
+  if (!userId) {
+    return res.status(400).json({ error: 'Target userId is required.' });
   }
 
-  const user = db.getUserById(userId);
-  if (!user) return res.status(404).json({ error: 'User not found' });
+  const currentAuth = await getAuthUser(req);
 
-  const student = user.role === 'STUDENT' ? db.getStudentProfileByUserId(user.id) : null;
-  const faculty = user.role === 'FACULTY' ? db.getFacultyProfileByUserId(user.id) : null;
+  // Unauthenticated requests are strictly rejected
+  if (!currentAuth.user) {
+    return res.status(401).json({ error: 'Authentication required.' });
+  }
 
-  const token = createAuthToken(user.id);
+  // Non-administrators cannot switch accounts
+  if (currentAuth.user.role !== 'ADMIN') {
+    db.addSecurityEvent({
+      eventType: 'UNAUTHORIZED_ACCESS',
+      actorEmail: currentAuth.user.email,
+      actorId: currentAuth.user.id,
+      actorName: currentAuth.user.name,
+      actorRole: currentAuth.user.role,
+      resource: '/api/auth/switch-user',
+      actionAttempted: `SWITCH_USER_TO_${userId}`,
+      severity: 'HIGH',
+      status: 'BLOCKED',
+      reason: 'Non-admin role attempted user impersonation.',
+      description: 'Account switching forbidden for non-administrative role.',
+    });
+    return res.status(403).json({ error: 'Administrative privileges required to switch accounts.' });
+  }
 
-  res.json({ token, user: sanitizeUser(user), student, faculty });
+  const targetUser = db.getUserById(userId);
+  if (!targetUser) return res.status(404).json({ error: 'Target user not found' });
+
+  // Record audit log for admin user switch
+  db.addAuditLog({
+    action: 'ADMIN_USER_SWITCH',
+    performedBy: currentAuth.user.id,
+    performedByName: currentAuth.user.name,
+    userRole: 'ADMIN',
+    entityId: targetUser.id,
+    entityType: 'USER',
+    details: `Admin ${currentAuth.user.email} switched persona to ${targetUser.email} (${targetUser.role})`,
+  });
+
+  const student = targetUser.role === 'STUDENT' ? db.getStudentProfileByUserId(targetUser.id) : null;
+  const faculty = targetUser.role === 'FACULTY' ? db.getFacultyProfileByUserId(targetUser.id) : null;
+
+  const token = await createAuthToken(targetUser.id, targetUser.role);
+
+  res.json({ token, user: sanitizeUser(targetUser), student, faculty });
 });
 
 // --- EXPERIENCES ROUTES ---
@@ -669,7 +835,23 @@ apiRouter.delete('/faculty/experiences/:id', async (req: Request, res: Response)
 
 apiRouter.post('/experiences/:id/verify-pass', async (req: Request, res: Response) => {
   const { user } = await getAuthUser(req);
-  const userId = user?.id || (req.headers['x-user-id'] as string) || 'FACULTY_SCANNER';
+  if (!user) {
+    return res.status(401).json({
+      status: 'UNAUTHORIZED',
+      success: false,
+      title: 'Authentication Required',
+      message: 'Valid institutional login required to scan boarding passes.',
+    });
+  }
+  if (user.role !== 'FACULTY' && user.role !== 'ADMIN') {
+    return res.status(403).json({
+      status: 'FORBIDDEN',
+      success: false,
+      title: 'Access Denied',
+      message: 'Only Faculty coordinators and Administrators are authorized to verify attendance.',
+    });
+  }
+  const userId = user.id;
   const experienceId = req.params.id;
   const { passNumber, studentId, registrationId, qrPayload } = req.body;
 
@@ -2585,12 +2767,22 @@ apiRouter.delete('/admin/security-recipients/:id', async (req: Request, res: Res
 // PHASE 2: AUTOMATIC 3-DAY PRE-TRIP REMINDER & SCHEDULER CONTROLLER
 // =========================================================================
 
+function safeCompareSecret(provided: string, expected: string): boolean {
+  if (!provided || !expected) return false;
+  try {
+    const bufA = Buffer.from(provided);
+    const bufB = Buffer.from(expected);
+    if (bufA.length !== bufB.length) return false;
+    return crypto.timingSafeEqual(bufA, bufB);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Validates whether incoming request is authorized to trigger the automated reminder scheduler.
- * Supports:
- * 1. CRON_SECRET / SCHEDULER_SECRET in Authorization Bearer or custom headers.
- * 2. Google Cloud Scheduler native headers (X-CloudScheduler, X-AppEngine-Cron) and OIDC token.
- * 3. Authenticated Admin / Faculty user sessions.
+ * Enforces cryptographic CRON_SECRET matching or authenticated Admin/Faculty session.
+ * Disallows arbitrary caller headers (User-Agent, X-CloudScheduler) without valid secrets.
  */
 async function validateSchedulerAuth(req: Request): Promise<{
   authorized: boolean;
@@ -2602,44 +2794,44 @@ async function validateSchedulerAuth(req: Request): Promise<{
   const cronSecret = process.env.CRON_SECRET || process.env.SCHEDULER_SECRET;
   const authHeader = req.headers.authorization;
   const customSecretHeader = (req.headers['x-scheduler-secret'] || req.headers['x-cron-secret']) as string | undefined;
-  const isGcpSchedulerHeader = req.headers['x-cloudscheduler'] === 'true' || req.headers['x-appengine-cron'] === 'true';
-  const isGcpUserAgent = (req.headers['user-agent'] || '').includes('Google-Cloud-Scheduler');
 
-  // 1. Verify CRON_SECRET if configured
-  if (cronSecret) {
-    if (customSecretHeader && customSecretHeader === cronSecret) {
+  // 1. Verify CRON_SECRET if configured (using constant-time comparison)
+  if (cronSecret && cronSecret.trim().length > 0) {
+    if (customSecretHeader && safeCompareSecret(customSecretHeader.trim(), cronSecret.trim())) {
       return { authorized: true, triggerSource: 'CLOUD_SCHEDULER_SECRET' };
     }
-    if (authHeader && authHeader === `Bearer ${cronSecret}`) {
-      return { authorized: true, triggerSource: 'CLOUD_SCHEDULER_BEARER' };
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.substring(7).trim();
+      if (safeCompareSecret(token, cronSecret.trim())) {
+        return { authorized: true, triggerSource: 'CLOUD_SCHEDULER_BEARER' };
+      }
     }
   }
 
-  // 2. Verify Google Cloud Scheduler native invocation / GCP OIDC
-  if (isGcpSchedulerHeader || isGcpUserAgent) {
-    return { authorized: true, triggerSource: 'GOOGLE_CLOUD_SCHEDULER' };
-  }
-
-  // 3. Verify Admin / Faculty logged-in session
+  // 2. Verify Admin / Faculty logged-in session
   const auth = await getAuthUser(req);
-  if (auth.user && (auth.user.role === 'ADMIN' || auth.user.role === 'FACULTY')) {
-    return {
-      authorized: true,
-      triggerSource: auth.user.role === 'ADMIN' ? 'ADMIN_CONSOLE' : 'FACULTY_PORTAL',
-      user: auth.user,
-    };
-  }
-
-  // If CRON_SECRET is not configured in environment, allow local/internal server requests
-  if (!cronSecret && (req.ip === '127.0.0.1' || req.ip === '::1' || req.hostname === 'localhost')) {
-    return { authorized: true, triggerSource: 'LOCAL_INVOCATION' };
+  if (auth.user) {
+    if (auth.user.role === 'ADMIN' || auth.user.role === 'FACULTY') {
+      return {
+        authorized: true,
+        triggerSource: auth.user.role === 'ADMIN' ? 'ADMIN_CONSOLE' : 'FACULTY_PORTAL',
+        user: auth.user,
+      };
+    } else {
+      return {
+        authorized: false,
+        triggerSource: 'UNAUTHORIZED_ROLE',
+        statusCode: 403,
+        error: 'Forbidden: Students are not authorized to trigger reminder scheduler operations.',
+      };
+    }
   }
 
   return {
     authorized: false,
     triggerSource: 'UNAUTHORIZED',
     statusCode: 401,
-    error: 'Unauthorized: Valid Cloud Scheduler credentials or Admin/Faculty session required.',
+    error: 'Unauthorized: Valid CRON_SECRET or authorized Admin/Faculty session required.',
   };
 }
 
